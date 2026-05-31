@@ -28,6 +28,14 @@ image = (
     .add_local_dir(".", "/root/moe-lab")   # mounted at runtime (code iteration without rebuild)
 )
 
+# separate image for lm-evaluation-harness (heavy deps: transformers/datasets) so it doesn't
+# perturb the training image. torch pinned first so lm-eval doesn't pull a different build.
+eval_image = (
+    modal.Image.debian_slim(python_version="3.11")
+    .pip_install("torch==2.12.0", "numpy", "tiktoken", "lm-eval==0.4.9.1", "datasets", "huggingface-hub")
+    .add_local_dir(".", "/root/moe-lab")
+)
+
 app = modal.App("moe-lab", image=image)
 vol = modal.Volume.from_name("fineweb10B", create_if_missing=True)
 
@@ -177,6 +185,74 @@ def train_8(preset, steps, run_name, overrides, micro, seq_len, batch_tokens, sa
                        save_every, data_dir, opts)
 
 
+# default benchmark suite for small models (all loglikelihood / multiple-choice, GPT-2/Pythia-style)
+EVAL_TASKS = "lambada_openai,hellaswag,arc_easy,arc_challenge,piqa,winogrande,openbookqa,sciq,boolq"
+
+
+@app.function(image=eval_image, gpu="H100", volumes={"/data": vol},
+              timeout=4 * 60 * 60, secrets=[modal.Secret.from_name("huggingface")])
+def lm_eval_run(run_name: str, ckpt: str = "model.pt", tasks: str = EVAL_TASKS,
+                limit: int = 0, batch_size: int = 32, num_fewshot: int = 0):
+    """Run the EleutherAI lm-evaluation-harness on a trained checkpoint."""
+    import os, sys, json
+    os.chdir("/root/moe-lab"); sys.path.insert(0, "/root/moe-lab")
+    import torch
+    from lm_eval import simple_evaluate
+    from generate import load_model
+    from eval_harness import MoELMWrapper
+
+    dev = torch.device("cuda")
+    torch.set_float32_matmul_precision("high")
+    ckpt_path = f"/data/runs/{run_name}/{ckpt}"
+    model, cfg, val_loss, step = load_model(ckpt_path, dev)
+    print(f"loaded {ckpt_path} | step={step} val_loss={val_loss} | "
+          f"d{cfg.d_model} L{cfg.n_layers} {cfg.n_experts}exp/top{cfg.top_k}", flush=True)
+
+    lm = MoELMWrapper(model, dev, max_length=1024, batch_size=batch_size)
+    task_list = [t for t in tasks.split(",") if t]
+    res = simple_evaluate(model=lm, tasks=task_list,
+                          limit=(limit or None), num_fewshot=num_fewshot, batch_size=batch_size)
+
+    # ---- print a clean table + persist results.json next to the checkpoint ----
+    print(f"\n=== lm-eval [{run_name}] ({num_fewshot}-shot, limit={limit or 'full'}) ===", flush=True)
+    print(f"{'task':>16} | {'metric':>10} | {'value':>7} | {'stderr':>7}")
+    print("-" * 50)
+    summary = {}
+    for task, metrics in sorted(res["results"].items()):
+        # prefer acc_norm where present, else acc, else first metric
+        pick = None
+        for key in ("acc_norm,none", "acc,none", "acc_norm", "acc"):
+            if key in metrics:
+                pick = key
+                break
+        if pick is None:
+            pick = next((k for k in metrics if not k.endswith("_stderr") and k != "alias"), None)
+        if pick is None:
+            continue
+        val = metrics[pick]
+        stderr = metrics.get(pick.replace(",none", "_stderr,none"), metrics.get(pick + "_stderr", float("nan")))
+        base = pick.split(",")[0]
+        summary[task] = {base: val}
+        try:
+            print(f"{task:>16} | {base:>10} | {val:>7.4f} | {float(stderr):>7.4f}", flush=True)
+        except (ValueError, TypeError):
+            print(f"{task:>16} | {base:>10} | {val:>7.4f} |     n/a", flush=True)
+    accs = [list(v.values())[0] for v in summary.values()]
+    if accs:
+        print("-" * 50)
+        print(f"{'AVERAGE':>16} | {'':>10} | {sum(accs)/len(accs):>7.4f} |", flush=True)
+
+    out = {"run": run_name, "step": step, "val_loss": val_loss, "num_fewshot": num_fewshot,
+           "limit": limit, "results": res["results"]}
+    try:
+        with open(f"/data/runs/{run_name}/lm_eval.json", "w") as f:
+            json.dump(out, f, indent=2, default=str)
+        vol.commit()
+    except Exception as e:
+        print(f"(could not save lm_eval.json: {e})", flush=True)
+    return summary
+
+
 @app.function(gpu="H100", timeout=30 * 60)
 def speed_probe(preset: str = "1B", opts: str = "baseline", steps: int = 25, warmup: int = 10,
                 micro: int = 8, seq_len: int = 1024):
@@ -275,8 +351,30 @@ def main(action: str = "train", preset: str = "130M", steps: int = 4000,
          run_name: str = "baseline", overrides: str = "", gpus: int = 1,
          chunks: int = 10, micro: int = 16, seq_len: int = 1024,
          batch_tokens: int = 262144, save_every: int = 0, data: str = "10B",
-         opts: str = "baseline"):
+         opts: str = "baseline", tasks: str = "", limit: int = 0, fewshot: int = 0):
     data_dir = DATASETS[data][1]
+    if action == "lmeval":
+        # EleutherAI lm-evaluation-harness on trained checkpoint(s). run_name="both" -> 130M + 500M.
+        targets = ["130M_10B", "500M_40B"] if run_name in ("both", "baseline", "") else [run_name]
+        tk = tasks or EVAL_TASKS
+        args_t = [(t, "model.pt", tk, limit, 32, fewshot) for t in targets]
+        print(f"lm-eval on {targets} | tasks={tk} | {fewshot}-shot | limit={limit or 'full'}", flush=True)
+        summaries = {t: s for t, s in zip(targets, lm_eval_run.starmap(args_t))}
+        all_tasks = sorted({k for s in summaries.values() for k in s})
+        print("\n=== lm-eval COMPARISON (acc / acc_norm) ===", flush=True)
+        header = f"{'task':>16} | " + " | ".join(f"{t:>12}" for t in targets)
+        print(header); print("-" * len(header))
+        for task in all_tasks:
+            cells = []
+            for t in targets:
+                v = summaries[t].get(task)
+                cells.append(f"{list(v.values())[0]:>12.4f}" if v else f"{'-':>12}")
+            print(f"{task:>16} | " + " | ".join(cells), flush=True)
+        for t in targets:
+            vals = [list(v.values())[0] for v in summaries[t].values()]
+            if vals:
+                print(f"  {t} average: {sum(vals)/len(vals):.4f}", flush=True)
+        return
     if action == "download":
         download.remote(chunks, data)
     elif action == "smoke":
@@ -346,5 +444,5 @@ def main(action: str = "train", preset: str = "130M", steps: int = 4000,
     elif action == "specdecode":
         specdecode.remote("130M_10B", "500M_40B", 4, overrides)
     else:
-        raise SystemExit(f"unknown action {action!r} "
-                         "(use download|smoke|train|speedtest|ablate_opts|ablate|results|generate|specdecode)")
+        raise SystemExit(f"unknown action {action!r} (use download|smoke|train|speedtest|ablate_opts|"
+                         "ablate|results|generate|specdecode|lmeval)")
