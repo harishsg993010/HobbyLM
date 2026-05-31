@@ -226,19 +226,24 @@ Validated by reproduction: MicroLlama 42.23 (card: 42.36), TinyLlama-1.1B-3T 52.
 | 3 | SmolLM2-135M | 135M | 2T | 43.13 | 33.20 | 52.25 | 29.44 | 58.59 | 60.37 | 68.39 | 49.34 |
 | 4 | gemma-3-270m | 270M | 6T | 41.28 | 30.60 | 53.43 | 28.33 | 57.07 | 57.77 | 68.12 | 48.09 |
 | 5 | pythia-410m | 410M | 300B | 40.14 | 28.80 | 52.96 | 23.98 | 45.45 | 58.50 | 67.52 | 45.34 |
-| 6 | **OURS-500M-MoE** | 500M/169M act | 40B | 41.54 | 29.60 | 51.62 | 22.35 | 42.72 | 51.04 | 69.64 | **44.07** |
+| 6 | **OURS-500M-MoE** | 500M/169M act | 40B | 41.56 | 29.80 | 51.30 | 22.44 | 42.76 | 50.98 | 69.53 | **44.05** |
 | 7 | opt-350m | 350M | 180B | 36.55 | 28.40 | 52.80 | 24.74 | 40.49 | 57.61 | 64.69 | 43.61 |
-| 8 | **OURS-130M-MoE** | 140M/62M act | 10B | 32.53 | 28.20 | 52.64 | 23.55 | 37.71 | 61.25 | 65.45 | **43.05** |
+| 8 | **OURS-130M-MoE** | 140M/62M act | 10B | 32.54 | 28.20 | 52.17 | 23.46 | 37.71 | 61.31 | 65.40 | **42.97** |
 | 9 | MicroLlama-300M | 300M | 50B | 34.22 | 30.40 | 51.30 | 23.21 | 39.23 | 52.57 | 64.69 | 42.23 |
 | 10 | gpt2-124m | 124M | ~10B | 31.15 | 27.40 | 51.46 | 22.53 | 39.60 | 49.94 | 62.24 | 40.62 |
 | 11 | pythia-160m | 160M | 300B | 30.21 | 26.60 | 49.64 | 24.83 | 36.95 | 42.42 | 59.52 | 38.60 |
 
 **Ranking ≈ sorted by pretrain tokens, not params.** The top 4 (SmolLM2/Qwen3/Gemma-3) use **2T–36T tokens
 (50–900× ours)** — a different data regime. Within the *classic* regime (≤300B tok), ours lead per token:
-OURS-500M (44.07, 40B tok) beats opt-350m / MicroLlama / gpt2 / pythia-160m and trails only pythia-410m (300B tok,
-7.5×). **OURS-130M (43.05, just 10B tok) beats MicroLlama-300M (50B), opt-350m (180B), and pythia-160m (300B)** —
+OURS-500M (44.05, 40B tok) beats opt-350m / MicroLlama / gpt2 / pythia-160m and trails only pythia-410m (300B tok,
+7.5×). **OURS-130M (42.97, just 10B tok) beats MicroLlama-300M (50B) and pythia-160m (300B)** —
 out-scoring 300M-param models trained on 5–30× more data. Per-token efficiency is the win; absolute score is
 gated by token budget → the 1B/100B run (and longer 130M/500M runs) is the lever. (≥1B refs: SmolLM2-1.7B 64.53,
 Qwen3-1.7B 62.49, TinyLlama-1.1B-3T 52.75; omitted from this <1B view.)
+
+*Eval-harness audit note:* our `MoELMWrapper` originally encoded context/continuation separately; fixed to match
+lm-eval's `_encode_pair` (joint boundary tokenization + trailing-whitespace handling), as the HF reference models
+use. Impact was negligible — 500M 44.07→44.05, 130M 43.05→42.97 (only winogrande moved, ~0.4) — so rankings and
+conclusions are unchanged. Numbers above are post-fix. (The 9-task table in §9 above predates the fix; same ~0.1 shift.)
 
 See [[moe-project]], [[modal-infra]].

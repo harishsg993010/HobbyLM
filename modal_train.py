@@ -227,16 +227,16 @@ REF_MODELS = {
     "gemma-3-1b":        ("google/gemma-3-1b-pt", "1.0B", "2T"),      # gated
 }
 
-# our own measured 7-task numbers (MicroLlama convention; from --action lmeval, 2026-05-31)
+# our own measured 7-task numbers (MicroLlama convention; --action lmeval, fixed _encode_pair, 2026-05-31)
 OUR_RESULTS = {
     "OURS-130M-MoE": {"params": "140M/62M act", "tokens": "10B",
-                      "scores": {"hellaswag": 32.53, "openbookqa": 28.20, "winogrande": 52.64,
-                                 "arc_challenge": 23.55, "arc_easy": 37.71, "boolq": 61.25, "piqa": 65.45},
-                      "avg": 43.05},
+                      "scores": {"hellaswag": 32.54, "openbookqa": 28.20, "winogrande": 52.17,
+                                 "arc_challenge": 23.46, "arc_easy": 37.71, "boolq": 61.31, "piqa": 65.40},
+                      "avg": 42.97},
     "OURS-500M-MoE": {"params": "500M/169M act", "tokens": "40B",
-                      "scores": {"hellaswag": 41.54, "openbookqa": 29.60, "winogrande": 51.62,
-                                 "arc_challenge": 22.35, "arc_easy": 42.72, "boolq": 51.04, "piqa": 69.64},
-                      "avg": 44.07},
+                      "scores": {"hellaswag": 41.56, "openbookqa": 29.80, "winogrande": 51.30,
+                                 "arc_challenge": 22.44, "arc_easy": 42.76, "boolq": 50.98, "piqa": 69.53},
+                      "avg": 44.05},
 }
 
 
