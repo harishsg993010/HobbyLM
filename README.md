@@ -43,8 +43,8 @@ python -m modal run modal_train.py --action train --preset 1B --gpus 8 --steps 2
 python -m modal run modal_train.py --action ablate --steps 3000
 python -m modal run modal_train.py --action results   # leaderboard by final val loss
 
-# train with throughput optimizations (see below)
-python -m modal run modal_train.py --action train --preset 1B --gpus 8 --opts all_safe
+# train with throughput optimizations (see below) — fused_ce is the win
+python -m modal run modal_train.py --action train --preset 1B --gpus 8 --opts fused_ce --micro 32
 ```
 
 ## Ablations (each changes ONE thing vs the 130M baseline)
@@ -56,11 +56,17 @@ Winners get promoted into the 500M/1B configs.
 Flag-gated speedups; see `docs/ARCHITECTURE_RESEARCH.md` §8. Always-on (numerics-identical):
 on-device loss accumulation (no per-micro sync), `expandable_segments` allocator, CUDA data
 prefetch. Opt-in via `--opts`:
-- **`fused_ce`** — chunked, checkpointed cross-entropy; never materializes the `(T,vocab)` fp32
-  logit tensor. Bit-identical loss, big memory headroom → larger batch. *(numerics-preserving)*
-- **`polar`** — Polar Express orthogonalizer in Muon (faster-converging than Newton-Schulz).
-- **`fp8`** — FP8 (`torch._scaled_mm`) lm_head, the largest GEMM. Unties the head (+`vocab×d` params).
-- **`all_safe`** = `fused_ce`+`polar` (recommended for the 1B) · **`all_max`** = `fp8`+`polar`.
+- **`fused_ce`** ✅ **the win** — chunked, checkpointed cross-entropy; never materializes the
+  `(T,vocab)` fp32 logit tensor. Bit-identical loss, **+6% step time, −21% peak memory**, enables a
+  ~2× larger batch (baseline OOMs where fused_ce fits). *Recommended for the 1B run.*
+- **`polar`** — Polar Express orthogonalizer in Muon. Measured a wash at our scale (no speed/quality
+  gain); kept as an option.
+- **`fp8`** ⚠️ **experimental/broken** — FP8 lm_head. No speedup, +51M params, and a zero-gradient
+  backward (model won't train). Do not use; needs a backward fix.
+- **`all_safe`** = `fused_ce`+`polar` · **`all_max`** = `fp8`+`polar` (broken).
+
+Measured results: see `docs/ARCHITECTURE_RESEARCH.md` §8. **Recommended: `--opts fused_ce`** (or
+`all_safe`), then bump `--micro` to spend the freed memory.
 
 ```bash
 # synthetic throughput probe at target scale (ms/step, tok/s, peak GB, speedup table)

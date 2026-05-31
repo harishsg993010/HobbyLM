@@ -156,6 +156,35 @@ defaults preserve the exact original training math.
 Harness: `--action speedtest` (synthetic ms/step + tok/s + peak-mem table at any preset) and
 `--action ablate_opts` (short real-data val-loss ablation across variants). CPU checks in `test_speedups.py`.
 
-<!-- RESULTS_PLACEHOLDER -->
+**MEASURED — 1B speed probe (H100, micro=8 × seq 1024, accum=1, synthetic):**
+
+| opts | ms/step | tok/s | peak GB | speedup | params |
+|---|---|---|---|---|---|
+| **fused_ce** | **209.2** | **39,166** | **26.4** | **1.06×** | 1037M |
+| all_safe (fused_ce+polar) | 210.1 | 38,988 | 26.4 | 1.06× | 1037M |
+| baseline | 222.5 | 36,821 | 33.3 | 1.00× | 1037M |
+| fp8 | 223.8 | 36,605 | 33.8 | 0.99× | 1089M |
+| polar | 224.8 | 36,445 | 33.3 | 0.99× | 1037M |
+| all_max (fp8+polar) | 228.7 | 35,819 | 33.8 | 0.97× | 1089M |
+
+The memory saving is the real lever: at **micro=32**, baseline / fp8 / polar / all_max all **OOM** (even with
+`expandable_segments`), while fused_ce / all_safe fit at 70.9 GB and reach **~74,400 tok/s** — roughly **2×**
+the throughput of baseline's largest fitting batch (≈36.8k tok/s at micro=8).
+
+**MEASURED — 130M quality ablation (1000 steps, FineWeb val loss):**
+
+| variant | val loss | note |
+|---|---|---|
+| **fused_ce** | **4.0681** | numerics-neutral (≈ baseline, marginally better) |
+| baseline | 4.0739 | reference |
+| polar | 4.0790 | neutral (within noise) |
+| all_safe | 4.0855 | neutral |
+| fp8 / all_max | 10.90 / 10.94 | **broken — frozen at init (no grad through fp8 backward)** |
+
+**Verdict:** ship **`fused_ce`** (free: +6% step time, −21% peak memory, ~2× batch headroom, quality-identical).
+**Polar Express** was a wash here (no speed or quality gain at this scale/horizon; kept as an option — may help
+over much longer runs per the paper). **FP8 head dropped:** no speedup, +51M params, and a zero-gradient
+backward bug that prevents training. The always-on opts (no-sync accumulation, `expandable_segments`, prefetch)
+are pure wins. For the 1B run: enable `fused_ce` and raise `micro_batch_seqs` to exploit the freed memory.
 
 See [[moe-project]], [[modal-infra]].
