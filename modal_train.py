@@ -242,8 +242,11 @@ OUR_RESULTS = {
 @app.function(image=eval_image, gpu="H100", timeout=3 * 60 * 60,
               secrets=[modal.Secret.from_name("huggingface")])
 def hf_eval(name: str, model_id: str, tasks: str = EVAL_TASKS_7,
-            limit: int = 0, batch_size: int = 64, num_fewshot: int = 0):
-    """Eval a HuggingFace model through the SAME lm-eval harness/protocol as our models."""
+            limit: int = 0, batch_size: str = "auto", num_fewshot: int = 0):
+    """Eval a HuggingFace model through the SAME lm-eval harness/protocol as our models.
+    batch_size='auto' so big-vocab models (Gemma-3 262k, Qwen3 151k) don't OOM in log_softmax."""
+    import os
+    os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
     import torch
     from lm_eval.evaluator import simple_evaluate
     dtype = "bfloat16" if torch.cuda.is_available() else "float32"
@@ -454,7 +457,7 @@ def main(action: str = "train", preset: str = "130M", steps: int = 4000,
         keys = [k for k in overrides.split(",") if k] if overrides else list(REF_MODELS)
         tk = tasks or EVAL_TASKS_7
         cols = [c for c in tk.split(",") if c]   # task display order
-        args_t = [(k, REF_MODELS[k][0], tk, limit, 64, fewshot) for k in keys]
+        args_t = [(k, REF_MODELS[k][0], tk, limit, "auto", fewshot) for k in keys]
         print(f"lm-eval (HF) on {len(keys)} models | tasks={tk} | {fewshot}-shot | limit={limit or 'full'}",
               flush=True)
         rows = {}  # name -> {"params","tokens","scores","avg"}
