@@ -35,6 +35,7 @@ eval_image = (
     .pip_install("torch==2.12.0", "numpy", "tiktoken", "lm-eval==0.4.9.1",
                  "transformers>=4.50,<5", "datasets", "huggingface-hub", "accelerate", "sentencepiece")
     # transformers <5 (lm-eval needs AutoModelForVision2Seq) but >=4.50 (for Gemma-3 / Qwen2.5 archs)
+    .env({"HF_HUB_DISABLE_XET": "1"})  # route downloads via std CDN (xet-read-token endpoint rate-limits under parallelism)
     .add_local_dir(".", "/root/moe-lab")
 )
 
