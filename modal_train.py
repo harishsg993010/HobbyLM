@@ -33,7 +33,8 @@ image = (
 eval_image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install("torch==2.12.0", "numpy", "tiktoken", "lm-eval==0.4.9.1",
-                 "transformers==4.48.3", "datasets", "huggingface-hub")  # transformers<5 (lm-eval needs Vision2Seq)
+                 "transformers>=4.50,<5", "datasets", "huggingface-hub", "accelerate", "sentencepiece")
+    # transformers <5 (lm-eval needs AutoModelForVision2Seq) but >=4.50 (for Gemma-3 / Qwen2.5 archs)
     .add_local_dir(".", "/root/moe-lab")
 )
 
@@ -188,6 +189,77 @@ def train_8(preset, steps, run_name, overrides, micro, seq_len, batch_tokens, sa
 
 # default benchmark suite for small models (all loglikelihood / multiple-choice, GPT-2/Pythia-style)
 EVAL_TASKS = "lambada_openai,hellaswag,arc_easy,arc_challenge,piqa,winogrande,openbookqa,sciq,boolq"
+# MicroLlama / TinyLlama 7-task comparison set (acc_norm except winogrande/boolq -> acc)
+EVAL_TASKS_7 = "hellaswag,openbookqa,winogrande,arc_challenge,arc_easy,boolq,piqa"
+
+
+def _pick_metric(task: str, metrics: dict):
+    """Return (base_metric_name, value) matching the MicroLlama/TinyLlama convention:
+    acc_norm where defined, else acc."""
+    for key in ("acc_norm,none", "acc,none", "acc_norm", "acc"):
+        if key in metrics:
+            return key.split(",")[0], metrics[key]
+    k = next((k for k in metrics if not k.endswith("_stderr") and k != "alias"), None)
+    return (k.split(",")[0], metrics[k]) if k else (None, None)
+
+
+# reference open models across sizes for an apples-to-apples comparison (run through OUR harness).
+# (name -> (hf_id, approx total params, pretrain tokens) for the annotated table)
+REF_MODELS = {
+    # classic baselines
+    "pythia-160m":       ("EleutherAI/pythia-160m", "160M", "300B"),
+    "pythia-410m":       ("EleutherAI/pythia-410m", "410M", "300B"),
+    "pythia-1.4b":       ("EleutherAI/pythia-1.4b", "1.4B", "300B"),
+    "gpt2-124m":         ("openai-community/gpt2", "124M", "~10B"),
+    "opt-350m":          ("facebook/opt-350m", "350M", "180B"),
+    "opt-1.3b":          ("facebook/opt-1.3b", "1.3B", "180B"),
+    # the user's reference rows
+    "MicroLlama-300M":   ("keeeeenw/MicroLlama", "300M", "50B"),
+    "TinyLlama-1.1B-3T": ("TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T", "1.1B", "3T"),
+    # latest small models (2025)
+    "SmolLM2-135M":      ("HuggingFaceTB/SmolLM2-135M", "135M", "2T"),
+    "SmolLM2-360M":      ("HuggingFaceTB/SmolLM2-360M", "360M", "4T"),
+    "SmolLM2-1.7B":      ("HuggingFaceTB/SmolLM2-1.7B", "1.7B", "11T"),
+    "Qwen3-0.6B":        ("Qwen/Qwen3-0.6B-Base", "600M", "36T"),
+    "Qwen3-1.7B":        ("Qwen/Qwen3-1.7B-Base", "1.7B", "36T"),
+    "gemma-3-270m":      ("google/gemma-3-270m", "270M", "6T"),       # gated (needs HF license accepted)
+    "gemma-3-1b":        ("google/gemma-3-1b-pt", "1.0B", "2T"),      # gated
+}
+
+# our own measured 7-task numbers (MicroLlama convention; from --action lmeval, 2026-05-31)
+OUR_RESULTS = {
+    "OURS-130M-MoE": {"params": "140M/62M act", "tokens": "10B",
+                      "scores": {"hellaswag": 32.53, "openbookqa": 28.20, "winogrande": 52.64,
+                                 "arc_challenge": 23.55, "arc_easy": 37.71, "boolq": 61.25, "piqa": 65.45},
+                      "avg": 43.05},
+    "OURS-500M-MoE": {"params": "500M/169M act", "tokens": "40B",
+                      "scores": {"hellaswag": 41.54, "openbookqa": 29.60, "winogrande": 51.62,
+                                 "arc_challenge": 22.35, "arc_easy": 42.72, "boolq": 51.04, "piqa": 69.64},
+                      "avg": 44.07},
+}
+
+
+@app.function(image=eval_image, gpu="H100", timeout=3 * 60 * 60,
+              secrets=[modal.Secret.from_name("huggingface")])
+def hf_eval(name: str, model_id: str, tasks: str = EVAL_TASKS_7,
+            limit: int = 0, batch_size: int = 64, num_fewshot: int = 0):
+    """Eval a HuggingFace model through the SAME lm-eval harness/protocol as our models."""
+    import torch
+    from lm_eval.evaluator import simple_evaluate
+    dtype = "bfloat16" if torch.cuda.is_available() else "float32"
+    print(f"[hf_eval] {name} ({model_id})", flush=True)
+    res = simple_evaluate(model="hf",
+                          model_args=f"pretrained={model_id},dtype={dtype},trust_remote_code=True",
+                          tasks=[t for t in tasks.split(",") if t],
+                          limit=(limit or None), num_fewshot=num_fewshot, batch_size=batch_size)
+    summary = {}
+    for task, metrics in res["results"].items():
+        base, val = _pick_metric(task, metrics)
+        if base is not None and val is not None:
+            summary[task] = round(100 * float(val), 2)
+    avg = round(sum(summary.values()) / len(summary), 2) if summary else None
+    print(f"[hf_eval] {name}: {summary} avg={avg}", flush=True)
+    return {"name": name, "model_id": model_id, "scores": summary, "avg": avg}
 
 
 @app.function(image=eval_image, gpu="H100", volumes={"/data": vol},
@@ -376,6 +448,41 @@ def main(action: str = "train", preset: str = "130M", steps: int = 4000,
             if vals:
                 print(f"  {t} average: {sum(vals)/len(vals):.4f}", flush=True)
         return
+    if action == "lmeval_hf":
+        # eval reference HF models through OUR harness (same 7-task MicroLlama protocol), then
+        # merge with our measured numbers into one comparison table. `overrides` = subset of REF_MODELS keys.
+        keys = [k for k in overrides.split(",") if k] if overrides else list(REF_MODELS)
+        tk = tasks or EVAL_TASKS_7
+        cols = [c for c in tk.split(",") if c]   # task display order
+        args_t = [(k, REF_MODELS[k][0], tk, limit, 64, fewshot) for k in keys]
+        print(f"lm-eval (HF) on {len(keys)} models | tasks={tk} | {fewshot}-shot | limit={limit or 'full'}",
+              flush=True)
+        rows = {}  # name -> {"params","tokens","scores","avg"}
+        for k, r in zip(keys, hf_eval.starmap(args_t, return_exceptions=True)):
+            if isinstance(r, Exception):
+                print(f"  !! {k} FAILED: {type(r).__name__}: {str(r)[:200]}", flush=True)
+                continue
+            rows[k] = {"params": REF_MODELS[k][1], "tokens": REF_MODELS[k][2],
+                       "scores": r["scores"], "avg": r["avg"]}
+        # add our measured models
+        for name, d in OUR_RESULTS.items():
+            rows[name] = d
+        # sort by avg (desc), print the full table
+        order = sorted(rows, key=lambda n: (rows[n]["avg"] is None, -(rows[n]["avg"] or 0)))
+        short = {"hellaswag": "hella", "openbookqa": "obqa", "winogrande": "wino",
+                 "arc_challenge": "arc_c", "arc_easy": "arc_e", "boolq": "boolq", "piqa": "piqa"}
+        head = (f"{'model':>18} | {'params':>13} | {'tok':>5} | "
+                + " | ".join(f"{short.get(c, c):>6}" for c in cols) + f" | {'avg':>6}")
+        print("\n=== 7-task comparison (acc_norm; winogrande/boolq=acc; run through our harness) ===", flush=True)
+        print(head); print("-" * len(head))
+        for n in order:
+            d = rows[n]
+            cells = " | ".join(f"{d['scores'].get(c, float('nan')):>6.2f}" for c in cols)
+            star = " *" if n.startswith("OURS") else ""
+            print(f"{n:>18} | {d['params']:>13} | {d['tokens']:>5} | {cells} | "
+                  f"{(d['avg'] if d['avg'] is not None else float('nan')):>6.2f}{star}", flush=True)
+        print("\n(* = our MoE models)", flush=True)
+        return
     if action == "download":
         download.remote(chunks, data)
     elif action == "smoke":
@@ -446,4 +553,4 @@ def main(action: str = "train", preset: str = "130M", steps: int = 4000,
         specdecode.remote("130M_10B", "500M_40B", 4, overrides)
     else:
         raise SystemExit(f"unknown action {action!r} (use download|smoke|train|speedtest|ablate_opts|"
-                         "ablate|results|generate|specdecode|lmeval)")
+                         "ablate|results|generate|specdecode|lmeval|lmeval_hf)")
