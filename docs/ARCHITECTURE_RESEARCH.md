@@ -217,6 +217,8 @@ lower val loss (3.03 vs 3.30). arc_challenge/winogrande sit at chance for both (
 hovers near the majority-class baseline (noisy for base models). Results saved to `runs/<name>/lm_eval.json`.
 
 **Sub-1B comparison — all run through OUR harness (`--action lmeval_hf`, identical 7-task protocol).**
+**All rows are BASE / pretrained-only checkpoints (no instruction tuning), 0-shot — matching our base models**
+(the widely-quoted Qwen3/Gemma-3/SmolLM2 *instruct* numbers are higher and would not be a fair comparison).
 Validated by reproduction: MicroLlama 42.23 (card: 42.36), TinyLlama-1.1B-3T 52.75 (card: 52.99). Sorted by avg:
 
 | # | model | params | tokens | hella | obqa | wino | arc_c | arc_e | boolq | piqa | **avg** |
