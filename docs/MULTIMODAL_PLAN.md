@@ -48,7 +48,13 @@ MoE as the LLM. Decisions locked 2026-05-31.
   so no extraction). DDP `vlm_stage1.py` on 8×H100. **Stage-1 projector: loss 6.66→3.02, 1500 steps (~0.7 epoch),
   ~20 min.** `500M_vlm_stage1/projector.pt`. **Captioning WORKS** (8/8 image-grounded, e.g. read the brand:
   "a white Hyundai car parked in front of a house"; "a boat in the harbor t shirt"). Backbone=`500M_ctx2048`,
-  projector=1.48M params. NEXT: stage-2 SFT on TinyLLaVA mix (projector+LLM). Eval: VQAv2 / GQA / TextVQA / POPE.
+  projector=1.48M params.
+- **Phase 1 — stage-2 SFT ✅ DONE (2026-05-31).** Chose the **single most effective subset**: LLaVA-Instruct-150K
+  (GPT-4 visual instructions) + **COCO train2017** (~19GB, streamed from train2017.zip; hit-rate 300/300, train2017
+  is the right split). `vlm_stage2.py` DDP: unfreeze LLM (502M trainable), init projector from stage-1, AdamW
+  (LLM 2e-5 / proj 1e-4) warmup+cosine, loss masked to assistant turns. **8×H100, micro 8, 1500 steps (~0.6 epoch,
+  ~13 min): loss 2.64→1.9.** `500M_vlm_stage2/model.pt`. Test: `--action caption --stage2_run 500M_vlm_stage2`
+  (USER:/ASSISTANT: chat format). Eval: VQAv2 / GQA / TextVQA / POPE (TODO).
 - **Phase 2 — (folded into 0)** full 729 tokens at 2048 ctx.
 - **Phase 3 — audio:** CLAP/BEATs encoder + AudioCaps/Clotho data + projector; joint image+audio SFT.
 - **Phase 4 (optional, novel) — MoE modality experts** ablation.
