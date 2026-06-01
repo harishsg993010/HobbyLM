@@ -42,8 +42,13 @@ MoE as the LLM. Decisions locked 2026-05-31.
   `build_inputs_embeds` splices projected feats at sentinels, right-pads (causal-safe) for mixed/text-only;
   `set_llm_trainable` for stage-1 freeze. `test_vlm.py` = 5 CPU tests pass. Vision encoder dim assumed 1152
   (SigLIP2 so400m); projector → d_model 768.
-- **Phase 1 — vision:** download LAION-558K; precompute SigLIP2 feats → volume; stage-1 projector;
-  stage-2 SFT on TinyLLaVA mix. Eval: VQAv2 / GQA / TextVQA / POPE.
+- **Phase 1 — vision — stage-1 ✅ DONE (2026-05-31).** vision.py (SigLIP2-so400m, 729×1152, frozen),
+  multimodal.py (MoEVLM; fixed 2 bugs: autocast cat dtype + next-token last-feature target), modal_mm.py
+  (moe-vlm app). **Images STREAMED from images.zip** (random-access read by name; unzip OOM'd container disk,
+  so no extraction). DDP `vlm_stage1.py` on 8×H100. **Stage-1 projector: loss 6.66→3.02, 1500 steps (~0.7 epoch),
+  ~20 min.** `500M_vlm_stage1/projector.pt`. **Captioning WORKS** (8/8 image-grounded, e.g. read the brand:
+  "a white Hyundai car parked in front of a house"; "a boat in the harbor t shirt"). Backbone=`500M_ctx2048`,
+  projector=1.48M params. NEXT: stage-2 SFT on TinyLLaVA mix (projector+LLM). Eval: VQAv2 / GQA / TextVQA / POPE.
 - **Phase 2 — (folded into 0)** full 729 tokens at 2048 ctx.
 - **Phase 3 — audio:** CLAP/BEATs encoder + AudioCaps/Clotho data + projector; joint image+audio SFT.
 - **Phase 4 (optional, novel) — MoE modality experts** ablation.
