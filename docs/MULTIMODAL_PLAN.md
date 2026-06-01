@@ -69,6 +69,13 @@ MoE as the LLM. Decisions locked 2026-05-31.
   captioning WORKS — 7-8/8 correct sounds**, *discriminates* birds vs crickets vs cars vs pouring-water vs voices
   (`--action caption_audio`). Repetition = same decoding fix (rep-penalty + no-repeat-3gram). NEXT: joint
   image+audio SFT for one unified model; WavCaps for more audio data.
+- **UNIFIED image+video+audio ✅ DONE (2026-06-01).** `video.py` SiglipVideo = sample frames → SigLIP2 →
+  concat RAW 729 tok/frame (NOT pooled: pooled tokens are OOD for mm_projector → garbage; learned this the hard
+  way). Video reuses `mm_projector` (VIDEO_TOKEN). `--action unified`: ONE MoEVLM = `500M_vlm_stage2` LLM +
+  mm_projector (image & video) + `500M_vlm_audio_stage1` audio_projector. **All 3 modalities work 4/4** — video
+  matches its source image (zero-shot, no video training); audio_projector trained on base LLM transfers to the
+  stage-2 LLM fine (hears engines/birds/gear-shifting). Context limit: 2 frames × 729 = 1458 < 2048. Next for video:
+  a video-SFT (or train mm_projector to accept pooled tokens for more frames).
 - **Phase 4 (optional, novel) — MoE modality experts** ablation.
 
 ## Compute (Modal, 8×H100)
