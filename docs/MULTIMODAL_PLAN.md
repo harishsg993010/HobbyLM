@@ -32,8 +32,11 @@ MoE as the LLM. Decisions locked 2026-05-31.
 4. RoPE: 1D positions for image/audio tokens to start; 2D/M-RoPE is a later upgrade.
 
 ## Roadmap
-- **Phase 0 — context extension (CRITICAL PATH, first):** add ckpt-resume to train.py; continued-pretrain
-  `500M_40B` at `seq_len=2048` on FineWeb (~1–3B tokens; θ=1e4→~4e4 or NTK). Validate ppl holds at 2048.
+- **Phase 0 — context extension — ✅ DONE (2026-05-31).** Added `--init_from`/`--lr_mult` to train.py;
+  continued-pretrained `500M_40B` at `seq_len=2048`, fused_ce, lr_mult 0.5, 2000 steps (~2.1B tok, ~1h, 8×H100),
+  θ kept at 1e4 (train-at-length, not extrapolation). **Result: `500M_ctx2048` val 2.9990 @ 2048 — BEATS the
+  original 3.0281 @ 1024.** Checkpoint `/data/runs/500M_ctx2048/model.pt`. This is the VLM backbone. (Gotcha:
+  Git-Bash mangled the `--init-from /data/...` POSIX path → use `MSYS_NO_PATHCONV=1`.)
 - **Phase 0.5 — VLM plumbing:** `forward(inputs_embeds)`, `MoEVLM`, special tokens, CPU splice unit-test.
 - **Phase 1 — vision:** download LAION-558K; precompute SigLIP2 feats → volume; stage-1 projector;
   stage-2 SFT on TinyLLaVA mix. Eval: VQAv2 / GQA / TextVQA / POPE.
