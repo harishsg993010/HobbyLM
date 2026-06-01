@@ -65,11 +65,12 @@ class MoELMWrapper(LM):
     def max_gen_toks(self) -> int:
         return 256
 
-    # ---- core: batched forward returning fp32 log-probs over the valid vocab ----
+    # ---- core: batched forward returning RAW logits (B, Lmax, vocab), right-padded ----
     @torch.no_grad()
-    def _logprobs(self, batch_inputs: list[list[int]]) -> torch.Tensor:
-        """batch_inputs: list of token-id lists (already truncated). Returns (B, Lmax, vocab) fp32 log-softmax,
-        right-padded with 0; only real positions are meaningful (causal attention)."""
+    def _logits(self, batch_inputs: list[list[int]]) -> torch.Tensor:
+        """Forward a right-padded batch; only real positions are meaningful (causal attention).
+        Returns raw logits in the model dtype — we log_softmax only the small continuation slice
+        per request (not the whole (B,Lmax,vocab)), which is ~100x less softmax compute on mmlu."""
         Lmax = max(len(x) for x in batch_inputs)
         B = len(batch_inputs)
         idx = torch.zeros(B, Lmax, dtype=torch.long, device=self._device)
@@ -77,9 +78,13 @@ class MoELMWrapper(LM):
             idx[j, :len(x)] = torch.tensor(x, dtype=torch.long, device=self._device)
         with self.amp:
             logits, _ = self.model(idx)
-        logits = logits.float()
-        logits[..., GPT2_VALID:] = -float("inf")   # never score padding-vocab tokens
-        return F.log_softmax(logits, dim=-1)
+        return logits
+
+    def _logp_slice(self, logits_slice: torch.Tensor) -> torch.Tensor:
+        """fp32 log-softmax over the valid vocab for a small (..., vocab) slice."""
+        sl = logits_slice.float()
+        sl[..., GPT2_VALID:] = -float("inf")       # never score padding-vocab tokens
+        return F.log_softmax(sl, dim=-1)
 
     # ---- loglikelihood: P(continuation | context) ----
     @torch.no_grad()
@@ -104,18 +109,25 @@ class MoELMWrapper(LM):
                 cont_len = min(len(cont_enc), len(inp))
                 inputs.append(inp)
                 metas.append((i, cont_len, cont_enc))
-            logp = self._logprobs(inputs)
+            logits = self._logits(inputs)
+            # compute per-request (ll, greedy) on-GPU, then sync ONCE per batch (not per request).
+            # per-request .item() was ~2 GPU->CPU syncs each -> pathologically slow on big tasks (mmlu).
+            lls, greedys, idxs = [], [], []
             for j, (i, cont_len, cont_enc) in enumerate(metas):
-                Lj = len(inputs[j])
                 if cont_len == 0:
                     results[i] = (0.0, True)
                     continue
-                sl = logp[j, Lj - cont_len:Lj, :]                # (cont_len, vocab) predicting the continuation
+                Lj = len(inputs[j])
+                sl = self._logp_slice(logits[j, Lj - cont_len:Lj, :])   # (cont_len, vocab) log-probs
                 tgt = torch.tensor(cont_enc[len(cont_enc) - cont_len:], device=self._device)
-                tok_lp = sl.gather(-1, tgt[:, None]).squeeze(-1)
-                ll = float(tok_lp.sum().item())
-                greedy = bool((sl.argmax(-1) == tgt).all().item())
-                results[i] = (ll, greedy)
+                lls.append(sl.gather(-1, tgt[:, None]).squeeze(-1).sum())   # 0-dim GPU tensors
+                greedys.append((sl.argmax(-1) == tgt).all())
+                idxs.append(i)
+            if idxs:
+                ll_list = torch.stack(lls).tolist()              # single sync
+                gd_list = torch.stack(greedys).tolist()          # single sync
+                for i, ll, g in zip(idxs, ll_list, gd_list):
+                    results[i] = (float(ll), bool(g))
         return results
 
     # ---- loglikelihood_rolling: total logprob of a full string (non-overlapping windows) ----
@@ -132,7 +144,7 @@ class MoELMWrapper(LM):
             for s in range(0, len(toks), self._max_length):
                 tgt = toks[s:s + self._max_length]
                 inp = inp_full[s:s + len(tgt)]
-                logp = self._logprobs([inp])[0]                   # (len(tgt), vocab)
+                logp = self._logp_slice(self._logits([inp])[0])   # (len(tgt), vocab)
                 t = torch.tensor(tgt, device=self._device)
                 total += float(logp[torch.arange(len(tgt), device=self._device), t].sum().item())
             out.append(total)
