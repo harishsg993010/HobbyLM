@@ -158,6 +158,115 @@ def audio_smoke():
     print("AUDIO SMOKE OK", flush=True)
 
 
+@app.function(image=vlm_image, gpu="H100", volumes={"/data": runs_vol, "/cache/hf": hf_cache},
+              timeout=6 * 60 * 60, secrets=[HF])
+def train_audio_stage1(max_steps: int = 1200, micro: int = 16, lr: float = 1e-3, warmup: int = 80,
+                       save_name: str = "500M_vlm_audio_stage1", repo: str = "CLAPv2/Clotho", log_every: int = 20):
+    """Audio stage-1 alignment: train ONLY the audio projector on Clotho; CLAP + LLM frozen. Single H100."""
+    import os, sys, time, torch
+    os.chdir("/root/moe-lab"); sys.path.insert(0, "/root/moe-lab")
+    from torch.utils.data import DataLoader
+    from audio import ClapAudio
+    from multimodal import MoEVLM
+    from generate import load_model
+    from vlm_audio_data import ClothoAudio, audio_collate
+
+    dev = torch.device("cuda")
+    torch.manual_seed(0); torch.set_float32_matmul_precision("high")
+    enc = ClapAudio(device=dev)
+    llm, cfg, vloss, _ = load_model(BACKBONE, dev)
+    vlm = MoEVLM(llm, vision_dim=1152, audio_dim=enc.hidden).to(dev)
+    vlm.set_llm_trainable(False); llm.set_bias_update_rate(0.0)
+    n_proj = sum(p.numel() for p in vlm.audio_projector.parameters())
+    print(f"backbone d{cfg.d_model} val={vloss:.3f} | CLAP hidden={enc.hidden} | audio-projector={n_proj/1e6:.2f}M", flush=True)
+    opt = torch.optim.AdamW(vlm.audio_projector.parameters(), lr=lr, betas=(0.9, 0.95), weight_decay=0.0)
+
+    ds = ClothoAudio(repo)
+    dl = DataLoader(ds, batch_size=micro, shuffle=True, num_workers=4, collate_fn=audio_collate,
+                    drop_last=True, persistent_workers=True)
+    vlm.train()
+    step, t0, run, last, done = 0, time.time(), 0.0, float("nan"), False
+    while not done:
+        for wavs, ids, tgt in dl:
+            ids, tgt = ids.to(dev), tgt.to(dev)
+            for g in opt.param_groups:
+                g["lr"] = lr * min(1.0, (step + 1) / warmup)
+            with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
+                feats = enc.encode(wavs)
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                loss, parts = vlm(ids, audio_features=feats, targets=tgt)
+            opt.zero_grad(set_to_none=True); loss.backward()
+            torch.nn.utils.clip_grad_norm_(vlm.audio_projector.parameters(), 1.0)
+            opt.step()
+            last = loss.item(); run += last
+            if step % log_every == 0:
+                print(f"step {step:5d} | loss {last:.4f} | avg {run/(step+1):.4f} | "
+                      f"lr {opt.param_groups[0]['lr']:.2e} | {(time.time()-t0)/(step+1)*1000:.0f}ms/step", flush=True)
+            step += 1
+            if step >= max_steps:
+                done = True; break
+
+    out = f"/data/runs/{save_name}"
+    os.makedirs(out, exist_ok=True)
+    torch.save({"audio_projector": vlm.audio_projector.state_dict(), "audio_dim": enc.hidden,
+                "backbone": BACKBONE, "steps": step}, f"{out}/audio_projector.pt")
+    runs_vol.commit()
+    print(f"saved audio projector -> {out}/audio_projector.pt (final {last:.4f})", flush=True)
+    return {"final_loss": last, "steps": step}
+
+
+@app.function(image=vlm_image, gpu="H100", volumes={"/data": runs_vol, "/cache/hf": hf_cache},
+              timeout=30 * 60, secrets=[HF])
+def caption_audio(audio_run: str = "500M_vlm_audio_stage1", n: int = 8, max_new: int = 32,
+                  repo: str = "CLAPv2/Clotho"):
+    """Greedy-caption a few Clotho clips with the audio VLM; print predicted vs ground-truth."""
+    import os, sys, torch
+    os.chdir("/root/moe-lab"); sys.path.insert(0, "/root/moe-lab")
+    import tiktoken
+    from audio import ClapAudio
+    from multimodal import MoEVLM, AUDIO_TOKEN
+    from generate import load_model, GPT2_VALID, EOT
+    from vlm_audio_data import ClothoAudio
+
+    dev = torch.device("cuda")
+    enc = ClapAudio(device=dev)
+    llm, cfg, _, _ = load_model(BACKBONE, dev)
+    vlm = MoEVLM(llm, vision_dim=1152, audio_dim=enc.hidden).to(dev)
+    ck = torch.load(f"/data/runs/{audio_run}/audio_projector.pt", map_location=dev, weights_only=False)
+    vlm.audio_projector.load_state_dict(ck["audio_projector"]); vlm.eval()
+    tok = tiktoken.get_encoding("gpt2")
+    ds = ClothoAudio(repo)
+
+    @torch.no_grad()
+    def gen(wav):
+        feats = enc.encode([wav])
+        ids = torch.tensor([[AUDIO_TOKEN]], device=dev)
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            cur, _ = vlm.build_inputs_embeds(ids, audio_features=feats)
+            outs = []
+            for _ in range(max_new):
+                logits, _ = vlm.llm(inputs_embeds=cur)
+                lg = logits[:, -1, :].float(); lg[:, GPT2_VALID:] = -float("inf")
+                if outs:
+                    u = torch.tensor(sorted(set(outs)), device=dev); v = lg[0, u]
+                    lg[0, u] = torch.where(v > 0, v / 1.3, v * 1.3)
+                t = int(lg.argmax(-1).item())
+                if t == EOT:
+                    break
+                outs.append(t)
+                cur = torch.cat([cur, vlm.llm.embed(torch.tensor([[t]], device=dev)).to(cur.dtype)], dim=1)
+        return tok.decode(outs)
+
+    for k in range(n):
+        i = (k * 619) % len(ds)
+        ex = ds.ds[i]
+        wav = ex[ds.audio_col]["array"]
+        gt = ex[ds.cap_col]
+        gt = (gt[0] if isinstance(gt, (list, tuple)) else gt)
+        print(f"\n[{i}] GT:   {str(gt)[:90]}\n     PRED: {gen(wav).strip()}", flush=True)
+    print("\nAUDIO CAPTION DONE", flush=True)
+
+
 @app.function(image=vlm_image, gpu="H100:8", volumes={"/data": runs_vol, "/llava": data_vol, "/cache/hf": hf_cache},
               timeout=12 * 60 * 60, secrets=[HF])
 def train_stage1(max_steps: int = 1500, micro: int = 32, lr: float = 1e-3, save_name: str = "500M_vlm_stage1"):
@@ -285,6 +394,11 @@ def main(action: str = "smoke", max_steps: int = 1500, micro: int = 32, lr: floa
         smoke.remote()
     elif action == "audio_smoke":
         audio_smoke.remote()
+    elif action == "audio_stage1":
+        train_audio_stage1.remote(max_steps=(max_steps if max_steps != 1500 else 1200),
+                                  micro=(micro if micro != 32 else 16), lr=lr)
+    elif action == "caption_audio":
+        caption_audio.remote(n=n)
     elif action == "stage1":
         train_stage1.remote(max_steps=max_steps, micro=micro, lr=lr)
     elif action == "stage2":
