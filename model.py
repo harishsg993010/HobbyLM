@@ -290,12 +290,19 @@ class MoETransformer(nn.Module):
             self._rope_cache[key] = (cos.to(dtype), sin.to(dtype))
         return self._rope_cache[key]
 
-    def forward(self, idx: Tensor, targets: Tensor | None = None):
-        B, S = idx.shape
-        x = self.embed(idx)
-        if self.cfg.scale_embeddings:
-            x = x * (self.cfg.d_model ** 0.5)
-        cos, sin = self.rope(S, idx.device, x.dtype)
+    def forward(self, idx: Tensor | None = None, targets: Tensor | None = None,
+                inputs_embeds: Tensor | None = None):
+        # accept either token ids OR precomputed embeddings (inputs_embeds), for multimodal splicing.
+        if inputs_embeds is None:
+            x = self.embed(idx)
+            if self.cfg.scale_embeddings:
+                x = x * (self.cfg.d_model ** 0.5)
+            device = idx.device
+        else:
+            x = inputs_embeds
+            device = inputs_embeds.device
+        B, S = x.shape[0], x.shape[1]
+        cos, sin = self.rope(S, device, x.dtype)
         aux_sum = x.new_zeros(())
         for blk in self.blocks:
             x, aux = blk(x, cos, sin)
