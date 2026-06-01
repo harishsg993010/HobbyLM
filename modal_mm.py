@@ -238,6 +238,14 @@ def caption_audio(audio_run: str = "500M_vlm_audio_stage1", n: int = 8, max_new:
     tok = tiktoken.get_encoding("gpt2")
     ds = ClothoAudio(repo)
 
+    def _banned(prev, n=3):
+        if len(prev) < n:
+            return []
+        seen = {}
+        for j in range(len(prev) - n + 1):
+            seen.setdefault(tuple(prev[j:j + n - 1]), []).append(prev[j + n - 1])
+        return seen.get(tuple(prev[-(n - 1):]), [])
+
     @torch.no_grad()
     def gen(wav):
         feats = enc.encode([wav])
@@ -251,6 +259,8 @@ def caption_audio(audio_run: str = "500M_vlm_audio_stage1", n: int = 8, max_new:
                 if outs:
                     u = torch.tensor(sorted(set(outs)), device=dev); v = lg[0, u]
                     lg[0, u] = torch.where(v > 0, v / 1.3, v * 1.3)
+                for bnd in _banned(outs, 3):                  # no-repeat-3gram (kills phrase loops)
+                    lg[0, bnd] = -float("inf")
                 t = int(lg.argmax(-1).item())
                 if t == EOT:
                     break

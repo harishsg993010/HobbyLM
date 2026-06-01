@@ -61,7 +61,14 @@ MoE as the LLM. Decisions locked 2026-05-31.
   **full-epoch retrain** (2500 steps = 1 epoch, the standard SFT length; >1 risks overfit): loss→1.58 (vs 0.6-ep 1.9).
   Real levers for more: full 665K mix (~50GB) or 1B backbone.
 - **Phase 2 — (folded into 0)** full 729 tokens at 2048 ctx.
-- **Phase 3 — audio:** CLAP/BEATs encoder + AudioCaps/Clotho data + projector; joint image+audio SFT.
+- **Phase 3 — audio — stage-1 ✅ DONE (2026-06-01).** `audio.py` (frozen CLAP `laion/clap-htsat-unfused`
+  → 64 tokens × 768; flatten HTSAT 2D map). `vlm_audio_data.ClothoAudio` reads the HF parquet via **pyarrow +
+  soundfile directly** (the `datasets` Audio loader fought back: torchcodec dep, then a pyarrow/dataclass crash —
+  bypassed entirely). Single-H100 `train_audio_stage1`: audio projector only (CLAP+LLM frozen), Clotho 3839 clips,
+  1200 steps (~17 min): **loss 4.46→2.77.** `500M_vlm_audio_stage1/audio_projector.pt` (1.18M params). **Audio
+  captioning WORKS — 7-8/8 correct sounds**, *discriminates* birds vs crickets vs cars vs pouring-water vs voices
+  (`--action caption_audio`). Repetition = same decoding fix (rep-penalty + no-repeat-3gram). NEXT: joint
+  image+audio SFT for one unified model; WavCaps for more audio data.
 - **Phase 4 (optional, novel) — MoE modality experts** ablation.
 
 ## Compute (Modal, 8×H100)
