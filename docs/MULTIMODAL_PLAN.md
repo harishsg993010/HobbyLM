@@ -37,7 +37,11 @@ MoE as the LLM. Decisions locked 2026-05-31.
   θ kept at 1e4 (train-at-length, not extrapolation). **Result: `500M_ctx2048` val 2.9990 @ 2048 — BEATS the
   original 3.0281 @ 1024.** Checkpoint `/data/runs/500M_ctx2048/model.pt`. This is the VLM backbone. (Gotcha:
   Git-Bash mangled the `--init-from /data/...` POSIX path → use `MSYS_NO_PATHCONV=1`.)
-- **Phase 0.5 — VLM plumbing:** `forward(inputs_embeds)`, `MoEVLM`, special tokens, CPU splice unit-test.
+- **Phase 0.5 — VLM plumbing — ✅ DONE (2026-05-31).** `model.forward(inputs_embeds=)` (bit-identical to
+  idx path); `multimodal.py`: `MoEVLM` + `Projector` (mlp2x_gelu) + sentinels IMAGE_TOKEN=50257/AUDIO_TOKEN=50258;
+  `build_inputs_embeds` splices projected feats at sentinels, right-pads (causal-safe) for mixed/text-only;
+  `set_llm_trainable` for stage-1 freeze. `test_vlm.py` = 5 CPU tests pass. Vision encoder dim assumed 1152
+  (SigLIP2 so400m); projector → d_model 768.
 - **Phase 1 — vision:** download LAION-558K; precompute SigLIP2 feats → volume; stage-1 projector;
   stage-2 SFT on TinyLLaVA mix. Eval: VQAv2 / GQA / TextVQA / POPE.
 - **Phase 2 — (folded into 0)** full 729 tokens at 2048 ctx.
