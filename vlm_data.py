@@ -16,7 +16,7 @@ import torch
 from PIL import Image
 from torch.utils.data import Dataset
 
-from multimodal import IMAGE_TOKEN, IGNORE_INDEX
+from multimodal import IMAGE_TOKEN, VIDEO_TOKEN, IGNORE_INDEX
 
 ENC = tiktoken.get_encoding("gpt2")
 EOT = 50256
@@ -60,11 +60,12 @@ class LlavaSFT(Dataset):
     [IMAGE] USER: q1 ASSISTANT: a1<eot> USER: q2 ASSISTANT: a2<eot> ... and trains next-token loss
     ONLY on the assistant answers (+ their EOT); image/scaffolding/user tokens are IGNORE.
     Images streamed from train2017.zip as 'train2017/<image>'."""
-    def __init__(self, json_path: str, zip_path: str, max_len: int = 1024):
+    def __init__(self, json_path: str, zip_path: str, max_len: int = 1024, sentinel: int = IMAGE_TOKEN):
         with open(json_path) as f:
             self.data = json.load(f)
         self.zip_path = zip_path
         self.max_len = max_len
+        self.sentinel = sentinel          # IMAGE_TOKEN, or VIDEO_TOKEN to present the same data as video
         self._zip = None
 
     def _z(self) -> zipfile.ZipFile:
@@ -78,7 +79,7 @@ class LlavaSFT(Dataset):
     def __getitem__(self, i):
         ex = self.data[i]
         # logical token stream + a per-token "is assistant answer" mask
-        logical = [IMAGE_TOKEN]
+        logical = [self.sentinel]                  # IMAGE_TOKEN or VIDEO_TOKEN
         mask = [False]
         for turn in ex["conversations"]:
             val = turn["value"].replace("<image>", "").strip()

@@ -391,10 +391,29 @@ def caption(stage1_run: str = "500M_vlm_stage1", n: int = 8, max_new: int = 32, 
     print("\nCAPTION DONE", flush=True)
 
 
+@app.function(image=vlm_image, gpu="H100:8", volumes={"/data": runs_vol, "/llava": data_vol, "/cache/hf": hf_cache},
+              timeout=12 * 60 * 60, secrets=[HF])
+def train_joint(max_steps: int = 1600, micro: int = 4, lr: float = 2e-5, save_name: str = "500M_vlm_joint",
+                stage2_run: str = "500M_vlm_stage2", audio_run: str = "500M_vlm_audio_stage1"):
+    """Joint image+video+audio SFT on 8x H100 (torchrun): co-train LLM + mm_projector + audio_projector."""
+    import os, subprocess
+    os.chdir("/root/moe-lab")
+    out = f"/data/runs/{save_name}"
+    cmd = ["torchrun", "--standalone", "--nproc_per_node=8", "vlm_joint.py",
+           "--stage2", f"/data/runs/{stage2_run}/model.pt", "--audio", f"/data/runs/{audio_run}/audio_projector.pt",
+           "--json", "/llava/llava_instruct_150k.json", "--zip", "/llava/train2017.zip",
+           "--clotho", "CLAPv2/Clotho", "--out", out,
+           "--max_steps", str(max_steps), "--micro", str(micro), "--lr", str(lr)]
+    print("RUN:", " ".join(cmd), flush=True)
+    subprocess.run(cmd, check=True)
+    runs_vol.commit()
+    return {"out": out, "steps": max_steps}
+
+
 @app.function(image=vlm_image, gpu="H100", volumes={"/data": runs_vol, "/llava": data_vol, "/cache/hf": hf_cache},
               timeout=30 * 60, secrets=[HF])
 def unified(stage2_run: str = "500M_vlm_stage2", audio_run: str = "500M_vlm_audio_stage1",
-            n: int = 4, max_new: int = 40):
+            n: int = 4, max_new: int = 40, joint_run: str = ""):
     """ONE model, three modalities: load stage-2 LLM + mm_projector (image & video) + audio_projector,
     then describe an image, a video (frames of it), and an audio clip."""
     import os, sys, io, json, zipfile, torch
@@ -412,12 +431,18 @@ def unified(stage2_run: str = "500M_vlm_stage2", audio_run: str = "500M_vlm_audi
     vis = SiglipVision(device=dev); vid = SiglipVideo(vis); aud = ClapAudio(device=dev)
     llm, cfg, _, _ = load_model(BACKBONE, dev)
     vlm = MoEVLM(llm, vision_dim=vis.hidden, audio_dim=aud.hidden).to(dev)
-    s2 = torch.load(f"/data/runs/{stage2_run}/model.pt", map_location=dev, weights_only=False)
-    vlm.llm.load_state_dict(s2["model"]); vlm.mm_projector.load_state_dict(s2["projector"])
-    ap = torch.load(f"/data/runs/{audio_run}/audio_projector.pt", map_location=dev, weights_only=False)
-    vlm.audio_projector.load_state_dict(ap["audio_projector"])
+    if joint_run:                                    # one checkpoint with all three (jointly trained)
+        jk = torch.load(f"/data/runs/{joint_run}/model.pt", map_location=dev, weights_only=False)
+        vlm.llm.load_state_dict(jk["model"]); vlm.mm_projector.load_state_dict(jk["projector"])
+        vlm.audio_projector.load_state_dict(jk["audio_projector"])
+        print(f"UNIFIED (joint): all three from {joint_run}", flush=True)
+    else:
+        s2 = torch.load(f"/data/runs/{stage2_run}/model.pt", map_location=dev, weights_only=False)
+        vlm.llm.load_state_dict(s2["model"]); vlm.mm_projector.load_state_dict(s2["projector"])
+        ap = torch.load(f"/data/runs/{audio_run}/audio_projector.pt", map_location=dev, weights_only=False)
+        vlm.audio_projector.load_state_dict(ap["audio_projector"])
+        print(f"UNIFIED: LLM+mm from {stage2_run}, audio from {audio_run}", flush=True)
     vlm.eval()
-    print(f"UNIFIED: LLM+mm_projector from {stage2_run}, audio_projector from {audio_run}", flush=True)
     tok = tiktoken.get_encoding("gpt2")
 
     def _banned(prev, k=3):
@@ -483,8 +508,11 @@ def main(action: str = "smoke", max_steps: int = 1500, micro: int = 32, lr: floa
                                   micro=(micro if micro != 32 else 16), lr=lr)
     elif action == "caption_audio":
         caption_audio.remote(n=n)
+    elif action == "joint":
+        train_joint.remote(max_steps=(max_steps if max_steps != 1500 else 1600),
+                           micro=(micro if micro != 32 else 4), lr=(2e-5 if lr == 1e-3 else lr))
     elif action == "unified":
-        unified.remote(n=(n if n != 8 else 4))
+        unified.remote(n=(n if n != 8 else 4), joint_run=stage2_run if stage2_run.startswith("500M_vlm_joint") else "")
     elif action == "stage1":
         train_stage1.remote(max_steps=max_steps, micro=micro, lr=lr)
     elif action == "stage2":
