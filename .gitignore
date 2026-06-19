@@ -1,6 +1,35 @@
+# --- Python ---
 __pycache__/
 *.pyc
-runs/
-*.pt
-*.bin
 .DS_Store
+.env
+*.key
+
+# --- Model weights & exports (download from HuggingFace: rootxhacker/HobbyLM-*) ---
+*.pt
+*.gguf
+*.safetensors
+*.onnx
+*.onnx.data
+*.bin
+checkpoints/
+
+# --- Data & run artifacts ---
+runs/
+data/
+*.jsonl
+*.zip
+*.wav
+*.log
+
+# --- Generated sample images (root only; app icons in subdirs are kept) ---
+/*.png
+
+# --- Rust / Tauri / JS build artifacts ---
+**/target/
+**/node_modules/
+hobby-chat/src-tauri/gen/
+
+# --- Vendored/external repos (have their own git) ---
+Megatron-Bridge/
+needle/

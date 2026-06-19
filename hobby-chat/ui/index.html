@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>HobbyLM Chat</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="app">
+    <header>
+      <div class="brand">
+        <span class="logo">◆</span>
+        <span>HobbyLM Chat</span>
+        <span id="modelBadge" class="badge">no model</span>
+      </div>
+      <div class="header-actions">
+        <span class="api-badge" title="OpenAI-compatible API — point any OpenAI client at this base URL">API&nbsp;127.0.0.1:11250/v1</span>
+        <label class="switch" title="Force a function call for this turn">
+          <input type="checkbox" id="toolsToggle" />
+          <span class="track"><span class="thumb"></span></span>
+          <span class="switch-label">Tools</span>
+        </label>
+        <button id="mcpBtn" class="ghost-btn" title="Manage MCP servers">MCP</button>
+        <button id="computerBtn" class="ghost-btn" title="Model-driven computer use (Windows UI Automation)">🖥 Computer</button>
+        <button id="newChat" class="ghost-btn">New chat</button>
+      </div>
+    </header>
+
+    <div id="mcpModal" class="modal-overlay" style="display:none">
+      <div class="modal">
+        <div class="modal-head">
+          <span>MCP servers</span>
+          <button id="mcpClose" class="chip-x" title="Close">×</button>
+        </div>
+        <div class="modal-sub">Connect stdio MCP servers; their tools join the chat tool-loop (turn on <b>Tools</b>).</div>
+        <div id="mcpList" class="mcp-list"></div>
+        <div class="mcp-add">
+          <input id="mcpName" type="text" placeholder="name (e.g. filesystem)" spellcheck="false" />
+          <input id="mcpCommand" type="text" placeholder="command (e.g. npx)" spellcheck="false" />
+          <input id="mcpArgs" type="text" placeholder='args (e.g. -y @modelcontextprotocol/server-filesystem C:\path)' spellcheck="false" />
+          <button id="mcpConnect" class="primary-btn">Connect</button>
+        </div>
+        <div id="mcpStatus" class="status"></div>
+      </div>
+    </div>
+
+    <div id="computerModal" class="modal-overlay" style="display:none">
+      <div class="modal">
+        <div class="modal-head">
+          <span>🖥 Computer use</span>
+          <button id="computerClose" class="chip-x" title="Close">×</button>
+        </div>
+        <div class="modal-sub">The model reads a window's <b>accessibility tree</b> and picks one grounded UI action.
+          <b>Preview</b> shows the planned action; <b>Run</b> performs it.</div>
+        <div id="computerModelBox">
+          <div class="computer-row">
+            <input id="computerModel" class="computer-input" style="margin-bottom:0" spellcheck="false"
+              placeholder="path to computer-use GGUF (e.g. computeruse-v3-hobbylm.gguf)" />
+            <button id="computerBrowse" class="ghost-btn" title="Browse…">…</button>
+            <button id="computerLoadBtn" class="ghost-btn">Load</button>
+          </div>
+          <div id="computerModelStatus" class="status" style="margin:2px 0 12px; min-height:16px"></div>
+        </div>
+        <div class="computer-row">
+          <select id="computerWindow" class="computer-input"></select>
+          <button id="computerRefresh" class="ghost-btn" title="Refresh window list">⟳</button>
+        </div>
+        <textarea id="computerInstr" class="computer-input" rows="2"
+          placeholder="single action: 'click the seven button' · or a goal (tick Plan): 'calculate 7 plus 2'"></textarea>
+        <div class="computer-row">
+          <label class="cu-toggle" title="Plan a multi-step goal: the model decomposes it and runs each step until done">
+            <input type="checkbox" id="computerPlan" /> Plan multi-step goal
+          </label>
+          <button id="computerPreview" class="ghost-btn">Preview</button>
+          <button id="computerRun" class="primary-btn">Run ▶</button>
+        </div>
+        <div id="computerLog" class="computer-log"></div>
+      </div>
+    </div>
+
+    <div id="setup" class="setup">
+      <div class="setup-card">
+        <h2>Load a model</h2>
+        <p>Point at a <code>hobbylm</code> GGUF (F32 or Q4_K_M). It loads as Q8 (~0.56&nbsp;GB).</p>
+        <div class="setup-row">
+          <input id="modelPath" type="text" spellcheck="false"
+                 placeholder="C:\…\joint12-hobbylm.gguf" />
+          <button id="browseBtn" class="ghost-btn">Browse…</button>
+          <button id="loadBtn" class="primary-btn">Load</button>
+        </div>
+        <div id="loadStatus" class="status"></div>
+      </div>
+    </div>
+
+    <main id="messages">
+      <div id="empty" class="empty">
+        <div class="empty-logo">◆</div>
+        <div class="empty-title">How can I help?</div>
+        <div class="empty-sub">A 500M sparse-MoE running entirely on your CPU.</div>
+      </div>
+    </main>
+
+    <footer>
+      <div id="micStatus" class="mic-status" style="display:none"></div>
+      <div id="attachChip" class="attach-chip" style="display:none">
+        <span class="chip-icon">📎</span>
+        <span id="attachName" class="chip-name"></span>
+        <span id="attachMeta" class="chip-meta"></span>
+        <button id="attachRemove" class="chip-x" title="Remove">×</button>
+      </div>
+      <div class="composer">
+        <button id="attachBtn" class="attach-btn" title="Upload an image" disabled>
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path
+            d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
+        </button>
+        <button id="micBtn" class="attach-btn mic-btn" title="Record voice (speech → MoE)" disabled hidden>
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path
+            d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/><path
+            d="M19 10v2a7 7 0 01-14 0v-2M12 19v4M8 23h8"/></svg>
+        </button>
+        <textarea id="input" rows="1" placeholder="Message HobbyLM Chat…"></textarea>
+        <button id="send" class="send-btn" title="Send" disabled>
+          <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor"
+            d="M12 21V6m0 0l-6 6m6-6l6 6" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>
+        </button>
+      </div>
+      <div class="hint">HobbyLM Chat can make mistakes. Local 500M model · Tools forces a function call.</div>
+    </footer>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>

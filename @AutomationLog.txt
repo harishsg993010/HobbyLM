@@ -1,0 +1,4 @@
+2026-06-04 17:51:38.771 <string>[8] <module> -> Find Control Timeout(10s): {Name: 'Search box', ControlType: EditControl}
+2026-06-04 17:51:50.931 <string>[8] <module> -> Find Control Timeout(10s): {Name: 'Name field', ControlType: EditControl}
+2026-06-04 17:53:38.891 <string>[6] <module> -> Find Control Timeout(10s): {Name: 'Search box', ControlType: EditControl}
+2026-06-04 17:53:50.995 <string>[6] <module> -> Find Control Timeout(10s): {Name: 'Name field', ControlType: EditControl}

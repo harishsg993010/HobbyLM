@@ -43,6 +43,10 @@ class ModelConfig:
     scale_embeddings: bool = False     # multiply token embeds by sqrt(d_model) (Gemma)
     final_z_loss_coef: float = 1e-4    # z-loss on final logits
     logit_softcap: float = 0.0         # 0 disables; e.g. 15-30 (Gemma-2)
+    # ---- diffusion conversion (LLaDA/MDLM: bidirectional attn + masked-token objective) ----
+    diffusion: bool = False            # True => full bidirectional attention + masked-diffusion loss (no AR)
+    mask_token_id: int = 50257         # free sentinel in the 50304-padded vocab (>= GPT2_VALID, never an AR token)
+    mask_eps: float = 1e-3             # min mask ratio: t ~ U(eps, 1) per sequence
     # ---- multi-token prediction (optional) ----
     n_mtp: int = 0                     # 0 disables; 1 = predict t+2 with one extra head
     mtp_weight: float = 0.1

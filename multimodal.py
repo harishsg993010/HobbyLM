@@ -26,6 +26,7 @@ AUDIO_TOKEN = 50258   # one sentinel per audio clip
 IM_START = 50259
 IM_END = 50260
 VIDEO_TOKEN = 50261   # video = sampled frames through the SAME vision encoder + mm_projector (no new encoder)
+SPEECH_TOKEN = 50262  # spoken language via a Whisper encoder + speech_projector (distinct from CLAP <audio>)
 IGNORE_INDEX = -1     # target value for non-text positions; matches model CE ignore_index
 
 
@@ -52,23 +53,27 @@ class MoEVLM(nn.Module):
       audio_features:  (B, Na, audio_dim) RAW frozen-encoder features, or None.
       targets:         (B, L) next-token targets aligned to input_ids (sentinels get IGNORE_INDEX), or None.
     """
-    def __init__(self, llm: MoETransformer, vision_dim: int = 1152, audio_dim: int | None = None):
+    def __init__(self, llm: MoETransformer, vision_dim: int = 1152, audio_dim: int | None = None,
+                 speech_dim: int | None = None):
         super().__init__()
         self.llm = llm
         self.d_model = llm.cfg.d_model
         self.mm_projector = Projector(vision_dim, self.d_model)
         self.audio_projector = Projector(audio_dim, self.d_model) if audio_dim else None
+        self.speech_projector = Projector(speech_dim, self.d_model) if speech_dim else None
 
     # ---- build the merged (B, L', d) embedding sequence by splicing modality features ----
     def build_inputs_embeds(self, input_ids: Tensor, image_features: Tensor | None = None,
                             audio_features: Tensor | None = None, targets: Tensor | None = None,
-                            video_features: Tensor | None = None):
+                            video_features: Tensor | None = None, speech_features: Tensor | None = None):
         B, L = input_ids.shape
         dev = input_ids.device
         img_proj = self.mm_projector(image_features) if image_features is not None else None  # (B,Ni,d)
         vid_proj = self.mm_projector(video_features) if video_features is not None else None   # video reuses mm_projector
         aud_proj = (self.audio_projector(audio_features)
                     if (audio_features is not None and self.audio_projector is not None) else None)
+        spk_proj = (self.speech_projector(speech_features)
+                    if (speech_features is not None and self.speech_projector is not None) else None)
 
         seqs_e, seqs_t = [], []
         for b in range(B):
@@ -85,6 +90,9 @@ class MoEVLM(nn.Module):
             if aud_proj is not None:
                 for p in (ids == AUDIO_TOKEN).nonzero(as_tuple=True)[0]:
                     spots.append((int(p), aud_proj[b]))
+            if spk_proj is not None:
+                for p in (ids == SPEECH_TOKEN).nonzero(as_tuple=True)[0]:
+                    spots.append((int(p), spk_proj[b]))
             spots.sort(key=lambda s: s[0])
 
             e_parts, t_parts, prev = [], [], 0
@@ -120,9 +128,9 @@ class MoEVLM(nn.Module):
 
     def forward(self, input_ids: Tensor, image_features: Tensor | None = None,
                 audio_features: Tensor | None = None, targets: Tensor | None = None,
-                video_features: Tensor | None = None):
+                video_features: Tensor | None = None, speech_features: Tensor | None = None):
         inputs_embeds, new_targets = self.build_inputs_embeds(
-            input_ids, image_features, audio_features, targets, video_features)
+            input_ids, image_features, audio_features, targets, video_features, speech_features)
         return self.llm(inputs_embeds=inputs_embeds, targets=new_targets)
 
     # ---- param groups: freeze encoders (external), optionally freeze the LLM (stage 1) ----
@@ -134,6 +142,8 @@ class MoEVLM(nn.Module):
         ps = list(self.mm_projector.parameters())
         if self.audio_projector is not None:
             ps += list(self.audio_projector.parameters())
+        if self.speech_projector is not None:
+            ps += list(self.speech_projector.parameters())
         return ps
 
 

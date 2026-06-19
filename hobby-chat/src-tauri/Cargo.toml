@@ -1,0 +1,36 @@
+[package]
+name = "hobby-chat"
+version = "0.1.0"
+edition = "2021"
+description = "Local ChatGPT-style desktop app for the 500M MoE, powered by the hobby-rs engine"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+evalexpr = "11"
+hobby-rs = { path = "../../hobby-rs" }
+anyhow = "1"
+# Pure-Rust local encoders (no ONNX/DLL): candle runs SigLIP2 + Whisper natively.
+candle-core = "0.10"
+candle-nn = "0.10"
+candle-transformers = "0.10"
+image = "0.25"
+base64 = "0.22"
+# our own HF downloader on ureq+rustls — hf-hub's sync path only supports native-tls (SChannel),
+# which gets reset on this/Cloudflare; rustls (pure-Rust) handshakes fine.
+ureq = "2"
+# Native computer-use: Windows UI-Automation accessibility tree snapshot + control patterns.
+uiautomation = "0.25"
+# MCP client (official SDK) — connect to stdio MCP servers for tool use.
+rmcp = { version = "1", features = ["client", "transport-child-process"] }
+tokio = { version = "1", features = ["rt-multi-thread", "process", "io-util", "time", "macros"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

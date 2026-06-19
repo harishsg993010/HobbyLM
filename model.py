@@ -137,6 +137,34 @@ def fused_cross_entropy(x: Tensor, weight: Tensor, targets: Tensor, *,
     return ce + z_coef * z_mean, z_mean.detach()
 
 
+# Masked-diffusion (LLaDA/MDLM) loss: cross-entropy on the masked positions only, reweighted
+# by 1/p_mask, summed and normalized by the total token count (B*L). Chunked + activation-
+# checkpointed like fused_cross_entropy so the (T, vocab) logits never fully materialize.
+
+def _dce_chunk(x_c: Tensor, weight: Tensor, tgt_c: Tensor, pm_c: Tensor, softcap: float, tied: bool):
+    logits = (x_c @ weight.T) if tied else (x_c @ weight)
+    if softcap > 0:
+        logits = softcap * torch.tanh(logits / softcap)
+    logits = logits.float()
+    lse = torch.logsumexp(logits, dim=-1)
+    valid = (tgt_c != -1)                                    # unmasked positions carry target -1
+    tgt_logit = logits.gather(-1, tgt_c.clamp_min(0).unsqueeze(-1)).squeeze(-1)
+    ce = (lse - tgt_logit) * valid / pm_c                    # 1/p_mask reweight; unmasked -> 0
+    return ce.sum()
+
+
+def diffusion_cross_entropy(x: Tensor, weight: Tensor, targets: Tensor, p_mask: Tensor, *,
+                            softcap: float, chunk: int, tied: bool):
+    """LLaDA loss = sum_{masked} CE / p_mask, normalized by B*L. Memory-light."""
+    from torch.utils.checkpoint import checkpoint
+    T = x.shape[0]
+    ce_sum = x.new_zeros((), dtype=torch.float32)
+    for i in range(0, T, chunk):
+        ce_sum = ce_sum + checkpoint(_dce_chunk, x[i:i + chunk], weight, targets[i:i + chunk],
+                                     p_mask[i:i + chunk], softcap, tied, use_reentrant=False)
+    return ce_sum / T
+
+
 def rms_norm(x: Tensor, weight: Tensor | None = None, eps: float = 1e-6) -> Tensor:
     out = F.rms_norm(x, (x.size(-1),), eps=eps)
     return out * weight if weight is not None else out
@@ -194,7 +222,8 @@ class Attention(nn.Module):
         # GQA: expand kv heads to match q heads
         k = k.repeat_interleave(self.rep, dim=1)
         v = v.repeat_interleave(self.rep, dim=1)
-        o = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        # diffusion (LLaDA) models see the whole noised canvas -> bidirectional; AR stays causal.
+        o = F.scaled_dot_product_attention(q, k, v, is_causal=not self.cfg.diffusion)
         o = o.transpose(1, 2).reshape(B, S, self.nq * self.hd)
         return self.proj(o)
 
@@ -291,7 +320,7 @@ class MoETransformer(nn.Module):
         return self._rope_cache[key]
 
     def forward(self, idx: Tensor | None = None, targets: Tensor | None = None,
-                inputs_embeds: Tensor | None = None):
+                inputs_embeds: Tensor | None = None, p_mask: Tensor | None = None):
         # accept either token ids OR precomputed embeddings (inputs_embeds), for multimodal splicing.
         if inputs_embeds is None:
             x = self.embed(idx)
@@ -319,6 +348,16 @@ class MoETransformer(nn.Module):
             return logits, aux_sum
 
         # ---- training: compute loss ----
+        if cfg.diffusion:
+            # LLaDA masked-diffusion loss on the noised positions (input already masked upstream;
+            # targets hold the original token at masked positions, -1 elsewhere; p_mask = per-token t).
+            assert p_mask is not None, "diffusion forward needs p_mask (use diffusion.forward_mask)"
+            loss_ce = diffusion_cross_entropy(
+                x.reshape(-1, x.size(-1)), self.lm_head.weight, targets.reshape(-1),
+                p_mask.reshape(-1), softcap=sc, chunk=cfg.ce_chunk, tied=not cfg.fp8_head)
+            loss = loss_ce + aux_sum
+            return loss, {"ce": loss_ce.detach(), "aux": aux_sum.detach(), "z": x.new_zeros(())}
+
         if cfg.fused_ce and not cfg.fp8_head:
             # chunked CE on the tied weight (V, d); never materializes the full fp32 logits.
             loss_cez, z = fused_cross_entropy(

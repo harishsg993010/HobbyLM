@@ -148,6 +148,79 @@ def smoke(preset: str = "130M"):
 
 
 @app.function(gpu="H100", volumes={"/data": vol}, timeout=20 * 60)
+def gpu_bench(diff_run: str = "500M_diff_20b", ar_run: str = "500M_40B",
+              gen_len: int = 128, block: int = 32, steps: int = 32):
+    """AR vs diffusion tok/s on GPU. Measures: (1) per-forward latency vs seq length (does the GPU
+    make a batched canvas-forward ~free? = the crux of whether diffusion can win), (2) end-to-end
+    tok/s for autoregressive decode vs iterative-denoising decode, (3) forwards-per-token."""
+    import os, sys, time, torch
+    os.chdir("/root/moe-lab"); sys.path.insert(0, "/root/moe-lab")
+    import tiktoken
+    from generate import load_model
+    from diffusion import generate as dgen
+    dev = torch.device("cuda")
+    enc = tiktoken.get_encoding("gpt2")
+    diff_model, dcfg, _, _ = load_model(f"/data/runs/{diff_run}/model.pt", dev)
+    ar_model, _, _, _ = load_model(f"/data/runs/{ar_run}/model.pt", dev)
+
+    def amp():
+        return torch.autocast("cuda", dtype=torch.bfloat16)
+
+    @torch.no_grad()
+    def time_forward(model, L, iters=30):
+        x = torch.randint(0, 50000, (1, L), device=dev)
+        with amp():
+            for _ in range(5):
+                model(x)
+            torch.cuda.synchronize(); t = time.time()
+            for _ in range(iters):
+                model(x)
+            torch.cuda.synchronize()
+        return (time.time() - t) / iters * 1000  # ms/forward
+
+    print("=== per-forward latency vs seq length (diffusion model, bidirectional, bf16) ===", flush=True)
+    lat = {}
+    for L in [1, 16, 32, 64, 128, 256]:
+        lat[L] = time_forward(diff_model, L)
+        print(f"  L={L:4d}: {lat[L]:6.2f} ms/forward   ({lat[L]/lat[1]:.2f}x of L=1)", flush=True)
+
+    ids = torch.tensor([enc.encode_ordinary("The capital of France is")], device=dev)
+
+    # AR end-to-end, naive (no KV cache — the training model has none), as a lower bound on AR
+    with torch.no_grad(), amp():
+        torch.cuda.synchronize(); t = time.time()
+        x = ids.clone()
+        for _ in range(gen_len):
+            logits, _ = ar_model(x[:, -1024:])
+            x = torch.cat([x, logits[:, -1].argmax(-1, keepdim=True)], 1)
+        torch.cuda.synchronize()
+    ar_naive = gen_len / (time.time() - t)
+
+    # diffusion end-to-end, counting forwards via a pre-hook
+    count = [0]
+    h = diff_model.register_forward_pre_hook(lambda m, i: count.__setitem__(0, count[0] + 1))
+    with torch.no_grad(), amp():
+        torch.cuda.synchronize(); t = time.time()
+        out = dgen(diff_model, ids, gen_len=gen_len, block=block, steps=steps,
+                   mask_id=dcfg.mask_token_id, temperature=0.0, rep_penalty=1.4, remask_steps=0)
+        torch.cuda.synchronize()
+    diff_dt = time.time() - t
+    h.remove()
+    ntok = out.shape[1]
+
+    print(f"\n=== end-to-end ({gen_len} tokens) ===", flush=True)
+    print(f"AR naive (no KV cache, LOWER bound):     {ar_naive:6.1f} tok/s", flush=True)
+    print(f"AR cached estimate (1 fwd/tok @ L=1):    {1000 / lat[1]:6.1f} tok/s", flush=True)
+    print(f"Diffusion (steps={steps} block={block}): {ntok / diff_dt:6.1f} tok/s "
+          f"| {count[0]} forwards = {count[0] / max(ntok,1):.2f} fwd/tok (AR cached = 1.0)", flush=True)
+    print(f"\nReading: AR-cached does ~1 fwd/token @ ~{lat[1]:.1f}ms; diffusion does "
+          f"{count[0]/max(ntok,1):.2f} fwd/token but each over the whole canvas (~{lat.get(128,0):.1f}ms @ L=128). "
+          f"Diffusion wins iff (fwd/tok x canvas_ms) < (1 x {lat[1]:.1f}ms).", flush=True)
+    return {"ar_naive": ar_naive, "ar_cached_est": 1000 / lat[1],
+            "diff_toks_per_s": ntok / diff_dt, "diff_fwd_per_tok": count[0] / max(ntok, 1), "lat": lat}
+
+
+@app.function(gpu="H100", volumes={"/data": vol}, timeout=20 * 60)
 def generate(run_name: str = "130M_10B", ckpt: str = "model.pt", prompt: str = "",
              max_new_tokens: int = 120, temperature: float = 0.9, top_k: int = 0):
     import os, sys
@@ -166,6 +239,58 @@ def generate(run_name: str = "130M_10B", ckpt: str = "model.pt", prompt: str = "
             "Artificial intelligence will",
         ]
     run(ckpt_path, prompts, max_new_tokens, temperature, top_k)
+
+
+@app.function(gpu="H100", volumes={"/data": vol}, timeout=20 * 60)
+def diffgen(run_name: str = "500M_diff_5b", ckpt: str = "ckpt_1000.pt", prompt: str = "",
+            gen_len: int = 64, block: int = 32, steps: int = 64, temperature: float = 0.0,
+            rep_penalty: float = 1.0, remask_steps: int = 0, remask_frac: float = 0.3,
+            sweep: int = 0):
+    """Iterative-denoising sample from a pure-diffusion (LLaDA) checkpoint. The saved config
+    carries diffusion=True, so load_model rebuilds it bidirectional automatically."""
+    import os, sys, torch
+    os.chdir("/root/moe-lab"); sys.path.insert(0, "/root/moe-lab")
+    import tiktoken
+    from generate import load_model
+    from diffusion import generate as dgen
+    dev = torch.device("cuda")
+    ckpt_path = f"/data/runs/{run_name}/{ckpt}"
+    model, cfg, val_loss, step = load_model(ckpt_path, dev)
+    assert cfg.diffusion, f"{ckpt_path} is not a diffusion model (cfg.diffusion=False)"
+    enc = tiktoken.get_encoding("gpt2")
+    prompts = [prompt] if prompt else [
+        "The capital of France is",
+        "Once upon a time, there was a",
+        "The meaning of life is",
+        "Water boils at a temperature of",
+    ]
+    print(f"loaded {ckpt_path} | step={step} val_loss={val_loss} | diffusion={cfg.diffusion} "
+          f"mask_id={cfg.mask_token_id}", flush=True)
+    # decode-config sweep: load model once, try several denoise settings on the same prompts.
+    if sweep:
+        configs = [
+            ("baseline      ", dict(block=32, steps=64,  temperature=0.7, rep_penalty=1.2, remask_steps=2)),
+            ("lowtemp       ", dict(block=32, steps=128, temperature=0.3, rep_penalty=1.3, remask_steps=2)),
+            ("greedy-careful", dict(block=16, steps=128, temperature=0.0, rep_penalty=1.3, remask_steps=2)),
+            ("ar-ish-block8 ", dict(block=8,  steps=128, temperature=0.2, rep_penalty=1.4, remask_steps=3)),
+            ("greedy-strong ", dict(block=32, steps=96,  temperature=0.0, rep_penalty=1.5, remask_steps=3)),
+        ]
+        prompts = prompts[:3]
+    else:
+        configs = [("single        ", dict(block=block, steps=steps, temperature=temperature,
+                                            rep_penalty=rep_penalty, remask_steps=remask_steps))]
+    for label, c in configs:
+        print("\n" + "#" * 78, flush=True)
+        print(f"# CONFIG [{label}] gen_len={gen_len} {c}", flush=True)
+        print("#" * 78, flush=True)
+        for p in prompts:
+            ids = torch.tensor([enc.encode_ordinary(p)], dtype=torch.long, device=dev)
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                out = dgen(model, ids, gen_len=gen_len, mask_id=cfg.mask_token_id, eos_id=50256,
+                           remask_frac=remask_frac, **c)
+            cont = enc.decode([t for t in out[0].tolist() if t < 50257])
+            print(f"  PROMPT: {p!r}")
+            print(f"  CONT:   {cont!r}\n", flush=True)
 
 
 @app.function(gpu="H100", volumes={"/data": vol}, timeout=20 * 60)
@@ -192,6 +317,13 @@ def train_1(preset, steps, run_name, overrides, micro, seq_len, batch_tokens, sa
 @app.function(gpu="H100:8", volumes={"/data": vol}, timeout=24 * 60 * 60)
 def train_8(preset, steps, run_name, overrides, micro, seq_len, batch_tokens, save_every=0,
             data_dir=DATA_DIR, opts="baseline", init_from="", lr_mult=1.0):
+    return _train_body(preset, steps, run_name, overrides, 8, micro, seq_len, batch_tokens,
+                       save_every, data_dir, opts, init_from, lr_mult)
+
+
+@app.function(gpu="B200:8", volumes={"/data": vol}, timeout=24 * 60 * 60)
+def train_8b200(preset, steps, run_name, overrides, micro, seq_len, batch_tokens, save_every=0,
+                data_dir=DATA_DIR, opts="baseline", init_from="", lr_mult=1.0):
     return _train_body(preset, steps, run_name, overrides, 8, micro, seq_len, batch_tokens,
                        save_every, data_dir, opts, init_from, lr_mult)
 
@@ -463,7 +595,7 @@ def main(action: str = "train", preset: str = "130M", steps: int = 4000,
          chunks: int = 10, micro: int = 16, seq_len: int = 1024,
          batch_tokens: int = 262144, save_every: int = 0, data: str = "10B",
          opts: str = "baseline", tasks: str = "", limit: int = 0, fewshot: int = 0,
-         init_from: str = "", lr_mult: float = 1.0):
+         init_from: str = "", lr_mult: float = 1.0, gpu_type: str = "H100"):
     data_dir = DATASETS[data][1]
     if action == "prep_data":
         prep_data.remote(tasks or "mmlu")
@@ -530,9 +662,31 @@ def main(action: str = "train", preset: str = "130M", steps: int = 4000,
     elif action == "smoke":
         smoke.remote(preset)
     elif action == "train":
-        fn = train_8 if gpus == 8 else train_1
+        if gpus == 8:
+            fn = train_8b200 if gpu_type.upper() == "B200" else train_8
+        else:
+            fn = train_1
+        print(f"training on {gpus}x{gpu_type.upper() if gpus == 8 else 'H100'}", flush=True)
         fn.remote(preset, steps, run_name, overrides, micro, seq_len, batch_tokens,
                   save_every, data_dir, opts, init_from, lr_mult)
+    elif action == "gpu_bench":
+        kv = dict(p.split("=", 1) for p in overrides.split(",") if "=" in p) if overrides else {}
+        r = gpu_bench.remote(diff_run=(run_name if run_name not in ("baseline", "") else "500M_diff_20b"),
+                             ar_run=kv.get("ar_run", "500M_40B"),
+                             gen_len=int(kv.get("gen_len", 128)), block=int(kv.get("block", 32)),
+                             steps=int(kv.get("steps", 32)))
+        print(r, flush=True)
+    elif action == "diffgen":
+        # iterative-denoising sample from a diffusion checkpoint. run_name=run, overrides="ckpt=ckpt_1000.pt"
+        kv = dict(p.split("=", 1) for p in overrides.split(",") if "=" in p) if overrides else {}
+        diffgen.remote(run_name=run_name or "500M_diff_5b", ckpt=kv.get("ckpt", "ckpt_1000.pt"),
+                       prompt=kv.get("prompt", ""), gen_len=int(kv.get("gen_len", 64)),
+                       block=int(kv.get("block", 32)), steps=int(kv.get("steps", 64)),
+                       temperature=float(kv.get("temperature", 0.0)),
+                       rep_penalty=float(kv.get("rep_penalty", 1.0)),
+                       remask_steps=int(kv.get("remask_steps", 0)),
+                       remask_frac=float(kv.get("remask_frac", 0.3)),
+                       sweep=int(kv.get("sweep", 0)))
     elif action == "speedtest":
         # synthetic throughput probe at the target scale (default 1B); one H100 per variant, parallel.
         variants = ["baseline", "fused_ce", "polar", "all_safe"]  # fp8 dropped: no speedup + zero-grad (see OPT_PRESETS)

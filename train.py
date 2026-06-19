@@ -26,6 +26,7 @@ from config import TrainConfig, get_config
 from data import data_generator, CUDAPrefetcher
 from model import MoETransformer, count_params
 from optim import build_optimizers
+from diffusion import forward_mask
 
 
 def lr_mult(step: int, tc: TrainConfig) -> float:
@@ -157,6 +158,13 @@ def main():
                     "config": {**cfg.to_dict(), "preset": args.preset}, **extra}, out_dir / fname)
         log(f"saved checkpoint -> {out_dir / fname}")
 
+    def model_loss(m, x, y):
+        # diffusion: ignore the AR-shifted y; mask x in-place and score the masked positions.
+        if cfg.diffusion:
+            noisy, labels, p_mask = forward_mask(x, cfg.mask_token_id, cfg.mask_eps)
+            return m(noisy, labels, p_mask=p_mask)
+        return m(x, y)
+
     @torch.no_grad()
     def evaluate(max_tokens=tc.val_tokens):
         model.eval()
@@ -165,7 +173,7 @@ def main():
         for _ in range(steps):
             x, y = next(gen)
             with amp:
-                loss, _ = raw_model(x, y)
+                loss, _ = model_loss(raw_model, x, y)
             tot_loss += loss.item() * x.numel()
             tot_tok += x.numel()
         model.train()
@@ -197,7 +205,7 @@ def main():
             sync_ctx = model.no_sync() if (ddp and micro < accum - 1) else nullcontext()
             with sync_ctx:
                 with amp:
-                    loss, _ = model(x, y)
+                    loss, _ = model_loss(model, x, y)
                 (loss / accum).backward()
             loss_accum += loss.detach() / accum
 

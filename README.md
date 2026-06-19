@@ -1,76 +1,99 @@
-# moe-lab
+# HobbyLM
 
-Clean, modular **Mixture-of-Experts** LLM codebase for building efficient models at
-**130M / 500M / 1B** total params, with ablation knobs as config flags. Trains on
-**Modal** GPUs (1–8× H100). Design rationale: [`docs/ARCHITECTURE_RESEARCH.md`](docs/ARCHITECTURE_RESEARCH.md).
+HobbyLM is a small language-model family I built from scratch on a hobby budget — a 500M-parameter
+sparse Mixture-of-Experts model, the training code that produced it, a from-scratch Rust engine that
+runs it on a laptop CPU, and a desktop app that wraps the whole thing. No cluster, no borrowed
+weights: just FineWeb, a handful of Modal H100 hours, and a lot of ablations.
 
-## Architecture
-Decoder-only transformer, pre-norm RMSNorm + **QK-norm**, **GQA** attention, **RoPE**, tied embeddings.
-FFN = **fine-grained SwiGLU MoE** (first layer dense): dropless token-choice top-k routing via
-`torch._grouped_mm`, **fp32 router**, DeepSeek-V3 **aux-loss-free bias** balancing + router z-loss.
-Optimizer: **Muon** (hidden + per-expert 3D matrices, batched Newton-Schulz) + **AdamW**
-(router, embeddings, head, norms). Mixed precision = fp32 master weights + bf16 autocast.
+The goal was to see how far you can actually get at the ~500M scale if you sweat the architecture and
+the systems work — and to own every layer of the stack end to end, from the optimizer to the GGUF
+reader to the click-to-run app.
 
-## Files
-| file | role |
-|---|---|
-| `config.py` | `ModelConfig` (+ ablation flags), `TrainConfig`, `PRESETS` (130M/500M/1B) |
-| `moe.py` | MoE layer: router, balancing, dropless expert compute (grouped/bmm/loop backends) |
-| `model.py` | attention (GQA+QK-norm+RoPE), dense FFN, blocks, GPT wrapper, loss, param counter |
-| `optim.py` | Muon (2D + batched 3D) + AdamW split |
-| `data.py` | FineWeb `.bin` loader (modded-nanogpt format), DDP-sharded |
-| `train.py` | training loop: LR schedule, grad accum, bias anneal, eval. Single-GPU or `torchrun` DDP |
-| `count_params.py` | param targets + local CPU smoke test (`--smoke`) |
-| `modal_train.py` | Modal harness: download data, GPU smoke, train, ablation suite |
+## The models
 
-## Usage
-```bash
-# local (CPU) sanity check — param counts + fwd/bwd
-python count_params.py --smoke
+Every variant shares one 500M sparse-MoE core and is published on Hugging Face under
+[`rootxhacker`](https://huggingface.co/rootxhacker):
 
-# Modal: one-time data download (~1B tokens)
-python -m modal run modal_train.py --action download --chunks 10
+- **HobbyLM-Base** — the pretrained foundation model (FineWeb).
+- **HobbyLM-Chat** — instruction / conversation tuned.
+- **HobbyLM-Computer-Use** — function calling + an accessibility-tree GUI agent.
+- **HobbyLM-Omni** — multimodal: text + image + audio (TinyLLaVA-style, with vision and speech projectors).
+- **HobbyLM-Diffusion** — a masked-diffusion (LLaDA-style) variant for parallel, bidirectional decoding.
+- **HobbyLM-Image** — a separate 1024px text-to-image diffusion model (a DiT, not a language model).
 
-# Modal: GPU smoke (grouped_mm + Muon + compile)
-python -m modal run modal_train.py --action smoke
+Each model repo ships `safetensors` + `config.json`; the GGUF builds live in **HobbyLM-gguf**.
 
-# train one preset (1x H100)
-python -m modal run modal_train.py --action train --preset 130M --steps 4000 --run-name baseline
-# 8x H100
-python -m modal run modal_train.py --action train --preset 1B --gpus 8 --steps 20000
+## Architecture, briefly
 
-# run the focused ablation suite (10 runs at 130M, in parallel)
-python -m modal run modal_train.py --action ablate --steps 3000
-python -m modal run modal_train.py --action results   # leaderboard by final val loss
+A decoder-only transformer with the modern small-MoE recipe, where each piece was chosen by ablation
+rather than vibes:
 
-# train with throughput optimizations (see below) — fused_ce is the win
-python -m modal run modal_train.py --action train --preset 1B --gpus 8 --opts fused_ce --micro 32
-```
+- **Sparse MoE FFN** — 36 fine-grained experts, top-6 routed, plus one always-on shared expert; the
+  first layer stays dense (DeepSeekMoE style).
+- **Sigmoid gating** with DeepSeek-V3's **aux-loss-free** load balancing — a learned bias steers which
+  experts get picked while the gate weights stay raw, so nothing fights the language-modeling objective.
+- **GQA** attention with **per-head QK-norm** applied before RoPE, and a decoupled head dimension.
+- Pre-norm **RMSNorm**, **RoPE**, tied embeddings, GPT-2 byte-level BPE.
+- Trained with **Muon** (on the 2-D and per-expert 3-D matrices) and AdamW for the rest.
 
-## Ablations (each changes ONE thing vs the 130M baseline)
-`softmax` gating · `aux_loss` (classic balance) · `shared1` (shared expert) · `no_qknorm` ·
-`no_renorm` (top-k gate renorm) · `topk8` · `experts16` · `no_zloss` · `scale_emb`.
-Winners get promoted into the 500M/1B configs.
+There are 130M / 500M / 1B presets; 500M is the one that got the full treatment. The design notes and
+the ablations behind each decision are in [`docs/ARCHITECTURE_RESEARCH.md`](docs/ARCHITECTURE_RESEARCH.md).
 
-## Throughput optimizations (nanogpt-inspired)
-Flag-gated speedups; see `docs/ARCHITECTURE_RESEARCH.md` §8. Always-on (numerics-identical):
-on-device loss accumulation (no per-micro sync), `expandable_segments` allocator, CUDA data
-prefetch. Opt-in via `--opts`:
-- **`fused_ce`** ✅ **the win** — chunked, checkpointed cross-entropy; never materializes the
-  `(T,vocab)` fp32 logit tensor. Bit-identical loss, **+6% step time, −21% peak memory**, enables a
-  ~2× larger batch (baseline OOMs where fused_ce fits). *Recommended for the 1B run.*
-- **`polar`** — Polar Express orthogonalizer in Muon. Measured a wash at our scale (no speed/quality
-  gain); kept as an option.
-- **`fp8`** ⚠️ **experimental/broken** — FP8 lm_head. No speedup, +51M params, and a zero-gradient
-  backward (model won't train). Do not use; needs a backward fix.
-- **`all_safe`** = `fused_ce`+`polar` · **`all_max`** = `fp8`+`polar` (broken).
+## Running it — `hobby-rs`
 
-Measured results: see `docs/ARCHITECTURE_RESEARCH.md` §8. **Recommended: `--opts fused_ce`** (or
-`all_safe`), then bump `--micro` to spend the freed memory.
+`hobby-rs/` is a from-scratch CPU inference engine in Rust. It memory-maps a HobbyLM GGUF, runs the
+sparse MoE natively (only the active experts are computed), and streams tokens — no llama.cpp, no
+Python, no ONNX at runtime. The matmul hot path is hand-written AVX2/SIMD, and every hyperparameter is
+read from the GGUF metadata, so nothing is hardcoded.
 
 ```bash
-# synthetic throughput probe at target scale (ms/step, tok/s, peak GB, speedup table)
-python -m modal run modal_train.py --action speedtest --preset 1B
-# quality ablation: short real 130M runs per variant -> final val loss
-python -m modal run modal_train.py --action ablate_opts --preset 130M --steps 800
+cd hobby-rs
+cargo build --release
+./target/release/hobby-rs --model HobbyLM-Chat.gguf --prompt "The capital of France is" --n 48
 ```
+
+The GGUFs declare a custom `hobbylm` architecture. They load directly in `hobby-rs`; stock llama.cpp
+would need the `hobbylm` arch registered first.
+
+## Chatting with it — `hobby-chat`
+
+`hobby-chat/` is a small Tauri desktop app (Rust backend + web UI): a local, ChatGPT-style window that
+embeds `hobby-rs` along with the multimodal encoders, computer-use (Windows UI-Automation accessibility
+tree), and an MCP client for tool use. Point it at a GGUF and everything runs on your machine.
+
+## Training it — `train.py` + Modal
+
+The training stack is plain PyTorch, run on [Modal](https://modal.com) serverless GPUs (1–8× H100):
+FineWeb in, checkpoints out, with the full ablation suite a flag away.
+
+```bash
+python count_params.py --smoke                                   # local CPU sanity check
+python -m modal run modal_train.py --action train --preset 500M  # train on Modal H100s
+python -m modal run modal_train.py --action ablate --steps 3000  # run the architecture ablations
+```
+
+Multimodal, tool-use, diffusion, and image-generation training live in `modal_mm.py`, `modal_tools.py`,
+`modal_dreamlite.py`, and the `dreamlite/` package.
+
+## Layout
+
+```
+config.py model.py moe.py optim.py train.py   core MoE training
+modal_train.py modal_mm.py modal_tools.py     Modal training harnesses
+dreamlite/  modal_dreamlite.py                text-to-image diffusion model
+to_gguf.py  modal_hobbylm.py                  GGUF / safetensors export + HF release
+hobby-rs/                                     Rust CPU inference engine
+hobby-rs-cli/                                 standalone CLI build of the engine
+hobby-chat/                                   Tauri desktop app
+docs/                                         architecture notes + plans
+```
+
+## Honest status
+
+This is a research / hobby project at the 500M scale. It's genuinely fluent and the multimodal and
+agent pieces work, but it carries the capability ceiling of a small model — it isn't meant to compete
+with frontier systems. Weights aren't checked into the repo; grab them from Hugging Face.
+
+## License
+
+Apache-2.0.
