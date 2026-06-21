@@ -1,0 +1,11 @@
+gradio==5.9.1
+huggingface_hub>=0.28,<1.0
+transformers==4.49.0
+diffusers==0.32.2
+accelerate
+safetensors
+tiktoken
+pillow
+numpy
+sentencepiece
+matplotlib

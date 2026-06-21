@@ -23,6 +23,7 @@
         </label>
         <button id="mcpBtn" class="ghost-btn" title="Manage MCP servers">MCP</button>
         <button id="computerBtn" class="ghost-btn" title="Model-driven computer use (Windows UI Automation)">🖥 Computer</button>
+        <button id="imageBtn" class="ghost-btn" title="Text-to-image (HobbyLM-Image: CLIP + DiT + DC-AE, on CPU)">🎨 Image</button>
         <button id="newChat" class="ghost-btn">New chat</button>
       </div>
     </header>
@@ -76,6 +77,36 @@
           <button id="computerRun" class="primary-btn">Run ▶</button>
         </div>
         <div id="computerLog" class="computer-log"></div>
+      </div>
+    </div>
+
+    <div id="imageModal" class="modal-overlay" style="display:none">
+      <div class="modal">
+        <div class="modal-head">
+          <span>🎨 Text-to-image</span>
+          <button id="imageClose" class="chip-x" title="Close">×</button>
+        </div>
+        <div class="modal-sub">HobbyLM-Image runs entirely on your CPU (CLIP text encoder → 333M flow-matching
+          DiT → DC-AE decoder). A 1024px render takes a while — this is from-scratch CPU inference.</div>
+        <div class="computer-row">
+          <input id="imageDir" class="computer-input" style="margin-bottom:0" spellcheck="false"
+            placeholder="path to exported image weights dir (image_weights/)" />
+          <button id="imageBrowse" class="ghost-btn" title="Browse…">…</button>
+          <button id="imageLoadBtn" class="ghost-btn">Load</button>
+        </div>
+        <div id="imageModelStatus" class="status" style="margin:2px 0 12px; min-height:16px"></div>
+        <textarea id="imagePrompt" class="computer-input" rows="2"
+          placeholder="a red cube on a wooden table, studio lighting"></textarea>
+        <input id="imageNeg" class="computer-input" spellcheck="false"
+          placeholder="negative prompt (blank = default: blurry, watermark, text…)" />
+        <div class="computer-row">
+          <label class="cu-toggle">Steps <input id="imageSteps" type="number" value="50" min="1" max="250" style="width:64px"></label>
+          <label class="cu-toggle">CFG <input id="imageCfg" type="number" value="5" min="1" max="15" step="0.5" style="width:56px"></label>
+          <label class="cu-toggle">Seed <input id="imageSeed" type="number" value="1234" style="width:88px"></label>
+          <button id="imageGenBtn" class="primary-btn">Generate ▶</button>
+        </div>
+        <div id="imageProgress" class="status" style="min-height:16px"></div>
+        <div id="imageResult" style="text-align:center"></div>
       </div>
     </div>
 

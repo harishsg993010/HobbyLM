@@ -261,21 +261,28 @@ def prep_traj(source: str = "nemotron", val_size: int = 2000, max_len: int = 204
               timeout=12 * 60 * 60, secrets=[HF])
 def train(max_steps: int = 4000, micro: int = 8, lr: float = 2e-5, save_name: str = "500M_vlm_tools",
           init_run: str = "500M_vlm_joint5", weighted: bool = False, train_file: str = "tools_train.jsonl",
-          traj: bool = False):
+          traj: bool = False, diffusion: bool = False, backbone_run: str = "", max_len: int = 0):
     """8xH100 torchrun SFT: init the LLM from the unified model and tool-tune on the prepared pairs.
-    weighted=True -> Needle's name3x/value2x/key1.5x weighted CE (targets argument-value precision)."""
+    weighted=True -> Needle's name3x/value2x/key1.5x weighted CE (targets argument-value precision).
+    diffusion=True -> masked-diffusion (LLaDA) SFT; use backbone_run=<diffusion ckpt> + init_run="none"."""
     import os, subprocess
     os.chdir("/root/moe-lab")
     out = f"/data/runs/{save_name}"
+    backbone = f"/data/runs/{backbone_run}/model.pt" if backbone_run else BACKBONE
     train_arg = ",".join(f"{TOOLS_DIR}/{p.strip()}" for p in train_file.split(","))  # combine sources
     cmd = ["torchrun", "--standalone", "--nproc_per_node=8", "training/train_tools.py",
-           "--backbone", BACKBONE, "--init", f"/data/runs/{init_run}/model.pt",
-           "--train", train_arg, "--out", out,
+           "--backbone", backbone, "--train", train_arg, "--out", out,
            "--max_steps", str(max_steps), "--micro", str(micro), "--lr", str(lr)]
+    if init_run and init_run.lower() != "none":
+        cmd += ["--init", f"/data/runs/{init_run}/model.pt"]
+    if max_len:
+        cmd += ["--max_len", str(max_len)]
+    if diffusion:
+        cmd += ["--diffusion", "1", "--traj", "1"]    # chat trajectories, masked-diffusion objective
+    elif traj:
+        cmd += ["--traj", "1"]
     if weighted:
         cmd += ["--weighted", "1"]
-    if traj:
-        cmd += ["--traj", "1"]
     print("RUN:", " ".join(cmd), flush=True)
     subprocess.run(cmd, check=True)
     runs_vol.commit()
@@ -463,6 +470,12 @@ def main(action: str = "prep", max_steps: int = 4000, micro: int = 8, lr: float 
         train.remote(max_steps=max_steps, micro=micro, lr=lr, save_name="500M_vlm_tools_w", weighted=True)
     elif action == "prep_traj":
         prep_traj.remote(source=(source or "nemotron"))
+    elif action == "train_diff":
+        # masked-diffusion (LLaDA) chat SFT of the diffusion base model on smoltalk trajectories
+        train.remote(max_steps=(max_steps if max_steps != 4000 else 8000), micro=(micro if micro != 8 else 16),
+                     lr=(lr if lr != 2e-5 else 2e-5), diffusion=True, backbone_run=(backbone or "500M_diff_20b"),
+                     init_run="none", save_name=(save or "500M_diff_chat"),
+                     train_file=(train_file or "chat_train.jsonl"), max_len=1024)
     elif action == "train_traj":
         train.remote(max_steps=(max_steps if max_steps != 4000 else 6000), micro=micro, lr=lr, traj=True,
                      save_name=(save or "500M_vlm_tools_traj"),

@@ -569,3 +569,58 @@ $("computerRun").onclick = () => runComputer(true);
 $("computerInstr").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); runComputer(true); }
 });
+
+// ---- text-to-image (HobbyLM-Image) ----
+const imageModal = $("imageModal");
+let imageBusy = false;
+$("imageBtn").onclick = () => { imageModal.style.display = "flex"; };
+$("imageClose").onclick = () => { imageModal.style.display = "none"; };
+imageModal.addEventListener("click", (e) => { if (e.target === imageModal) imageModal.style.display = "none"; });
+$("imageBrowse").onclick = async () => {
+  try {
+    const sel = await invoke("plugin:dialog|open", {
+      options: { multiple: false, directory: true, title: "Select exported image-weights directory" },
+    });
+    if (sel) $("imageDir").value = typeof sel === "string" ? sel : (sel.path ?? String(sel));
+  } catch (e) {}
+};
+$("imageLoadBtn").onclick = async () => {
+  const dir = $("imageDir").value.trim();
+  if (!dir) { $("imageModelStatus").textContent = "pick the image_weights directory first"; return; }
+  $("imageModelStatus").textContent = "loading image model (mmapping ~2.5 GB)…";
+  try {
+    const info = await invoke("load_image_model", { dir });
+    $("imageModelStatus").textContent = `image model ready · ${info.resolution}px`;
+  } catch (e) {
+    $("imageModelStatus").textContent = "load failed: " + e;
+  }
+};
+$("imageGenBtn").onclick = async () => {
+  if (imageBusy) return;
+  const prompt = $("imagePrompt").value.trim();
+  if (!prompt) { $("imageProgress").textContent = "type a prompt"; return; }
+  const neg = $("imageNeg").value;
+  const steps = parseInt($("imageSteps").value) || 50;
+  const cfg = parseFloat($("imageCfg").value) || 5;
+  const seed = parseInt($("imageSeed").value) || 1234;
+  imageBusy = true;
+  $("imageGenBtn").disabled = true;
+  $("imageResult").innerHTML = "";
+  $("imageProgress").textContent = "sampling…";
+  try {
+    await invoke("generate_image", { prompt, neg, steps, cfg, seed });
+  } catch (e) {
+    $("imageProgress").textContent = "error: " + e;
+    imageBusy = false; $("imageGenBtn").disabled = false;
+  }
+};
+listen("image_progress", (e) => {
+  const { step, total } = e.payload || {};
+  $("imageProgress").textContent = `denoising step ${step}/${total}… (decoding follows; CPU render is slow)`;
+});
+listen("image_done", (e) => {
+  const { data_uri, w, h } = e.payload || {};
+  $("imageProgress").textContent = `done · ${w}×${h}`;
+  $("imageResult").innerHTML = `<img src="${data_uri}" alt="generated" style="max-width:100%;border-radius:10px;margin-top:8px" />`;
+  imageBusy = false; $("imageGenBtn").disabled = false;
+});

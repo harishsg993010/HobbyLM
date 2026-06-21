@@ -1,12 +1,19 @@
 //! hobby-rs as a library: a self-contained `Engine` (owns all weights, no GGUF borrow) that
 //! loads the hobbylm GGUF and streams text generation. Used by the CLI and the Tauri app.
 
+pub mod clip;
 pub mod config;
+pub mod dcae;
+pub mod dit;
 pub mod gguf;
+pub mod imagegen;
+pub mod imgops;
 pub mod model;
 pub mod ops;
+pub mod png;
 pub mod quant;
 pub mod sample;
+pub mod st;
 pub mod tokenizer;
 
 use anyhow::Result;

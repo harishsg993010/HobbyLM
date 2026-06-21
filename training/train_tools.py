@@ -26,6 +26,27 @@ from hobbylm.generate import load_model
 from hobbylm.tool_data import ToolCallSFT, TrajectorySFT, tool_collate, tool_collate_weighted
 
 
+def sft_diffusion_mask(ids, tgt, mask_id, eps=1e-3):
+    """LLaDA-style SFT noising: mask ONLY the completion (assistant) tokens (tgt != -1) — the prompt
+    stays clean and is attended bidirectionally. Returns (noisy, labels, p_mask) for the model's
+    diffusion loss (loss only on the masked completion positions, reweighted by 1/p_mask)."""
+    B, L = ids.shape
+    dev = ids.device
+    trainable = tgt != -1
+    t = torch.rand(B, device=dev) * (1 - eps) + eps
+    p_mask = t[:, None].expand(B, L).contiguous()
+    mask = (torch.rand(B, L, device=dev) < p_mask) & trainable
+    # guarantee >=1 masked completion token per sequence (so no row contributes a zero/NaN loss)
+    none = trainable.any(1) & ~mask.any(1)
+    if none.any():
+        for r in none.nonzero(as_tuple=True)[0].tolist():
+            idxs = trainable[r].nonzero(as_tuple=True)[0]
+            mask[r, idxs[torch.randint(len(idxs), (1,), device=dev)]] = True
+    noisy = torch.where(mask, torch.full_like(ids, mask_id), ids)
+    labels = torch.where(mask, ids, torch.full_like(ids, -1))
+    return noisy, labels, p_mask
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--backbone", required=True)
@@ -39,10 +60,12 @@ def main():
     ap.add_argument("--max_len", type=int, default=2048)
     ap.add_argument("--weighted", type=int, default=0, help="1 -> weighted CE (name 3x/value 2x/key 1.5x)")
     ap.add_argument("--traj", type=int, default=0, help="1 -> multi-turn trajectory SFT (loss on all assistant turns)")
+    ap.add_argument("--diffusion", type=int, default=0, help="1 -> masked-diffusion (LLaDA) SFT objective")
     ap.add_argument("--log_every", type=int, default=25)
     ap.add_argument("--save_every", type=int, default=1000)
     args = ap.parse_args()
-    weighted = bool(args.weighted) and not args.traj
+    diffusion = bool(args.diffusion)
+    weighted = bool(args.weighted) and not args.traj and not diffusion
     traj = bool(args.traj)
 
     ddp = "RANK" in os.environ
@@ -67,6 +90,10 @@ def main():
         llm.load_state_dict(ck["model"])
         log(f"init LLM from {args.init}")
     llm.set_bias_update_rate(0.0)                     # freeze MoE aux-free balancing bias during SFT
+    mask_id = getattr(cfg, "mask_token_id", 50257)
+    if diffusion:
+        assert getattr(cfg, "diffusion", False), "--diffusion needs a diffusion backbone (cfg.diffusion=True)"
+        log(f"masked-diffusion SFT | mask_id={mask_id}")
     raw = llm
     model = DDP(llm, device_ids=[local]) if ddp else llm
     n_tr = sum(p.numel() for p in raw.parameters() if p.requires_grad) / 1e6
@@ -110,7 +137,10 @@ def main():
             for g in opt.param_groups:
                 g["lr"] = args.lr * lr_at(step)
             with amp:
-                if weighted:
+                if diffusion:
+                    noisy, labels, p_mask = sft_diffusion_mask(ids, tgt, mask_id)
+                    loss, _ = model(noisy, targets=labels, p_mask=p_mask)
+                elif weighted:
                     logits, aux = model(ids)            # (B,L,V); no internal CE
                     V = logits.shape[-1]
                     ce = F.cross_entropy(logits.reshape(-1, V).float(), tgt.reshape(-1),

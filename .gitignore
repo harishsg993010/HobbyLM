@@ -33,3 +33,7 @@ hobby-chat/src-tauri/gen/
 # --- Vendored/external repos (have their own git) ---
 Megatron-Bridge/
 needle/
+
+# --- image-gen export artifacts (download/regenerate) ---
+image_weights/
+saes/

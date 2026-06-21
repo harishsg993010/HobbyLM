@@ -9,6 +9,8 @@ mod mcp;
 mod server;
 mod tools;
 
+use base64::Engine as _;
+use hobby_rs::imagegen::{ImageEngine, NEG_DEFAULT};
 use hobby_rs::{Engine, GenOpts};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -20,6 +22,7 @@ struct AppState {
     cancel: Arc<AtomicBool>,
     encoders: Arc<Mutex<encoders::Encoders>>,
     mcp: Arc<Mutex<mcp::McpManager>>,
+    image: Arc<Mutex<Option<Arc<ImageEngine>>>>,
 }
 
 #[derive(Serialize, Clone)]
@@ -224,6 +227,58 @@ fn encode_image(path: String, state: State<AppState>) -> Result<String, String> 
         enc.encode_image(&path).map_err(|e| e.to_string())?
     };
     embeds_to_tempfile(&rows, "image")
+}
+
+// ---- text-to-image (HobbyLM-Image: CLIP + DiT + DC-AE, all in hobby-rs) ----
+
+#[derive(Serialize, Clone)]
+struct ImageModelInfo {
+    resolution: usize,
+}
+
+/// Load the exported image weights directory (dit/clip/dcae safetensors + metas). Returns the
+/// output resolution. Heavy (mmaps ~2.5 GB); call once.
+#[tauri::command]
+fn load_image_model(dir: String, state: State<AppState>) -> Result<ImageModelInfo, String> {
+    let eng = ImageEngine::load(std::path::Path::new(&dir)).map_err(|e| e.to_string())?;
+    let info = ImageModelInfo { resolution: eng.resolution() };
+    *state.image.lock().unwrap() = Some(Arc::new(eng));
+    Ok(info)
+}
+
+/// Generate an image from `prompt` on a background thread. Emits `image_progress` {step,total} per
+/// sampler step and `image_done` { data_uri } (a base64 PNG) when finished, or `image_error`.
+#[tauri::command]
+fn generate_image(
+    app: AppHandle,
+    prompt: String,
+    neg: Option<String>,
+    steps: usize,
+    cfg: f32,
+    seed: u64,
+    state: State<AppState>,
+) -> Result<(), String> {
+    let eng = state
+        .image
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| "image model not loaded".to_string())?;
+    let neg = neg.unwrap_or_else(|| NEG_DEFAULT.to_string());
+    let steps = steps.clamp(1, 250);
+    std::thread::spawn(move || {
+        let app2 = app.clone();
+        let (rgb, w, h) = eng.generate(&prompt, &neg, steps, cfg, seed, |s, tot| {
+            let _ = app2.emit("image_progress", serde_json::json!({ "step": s, "total": tot }));
+        });
+        let png = hobby_rs::png::encode_rgb(&rgb, w, h);
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
+        let _ = app.emit(
+            "image_done",
+            serde_json::json!({ "data_uri": format!("data:image/png;base64,{b64}"), "w": w, "h": h }),
+        );
+    });
+    Ok(())
 }
 
 // ---- MCP ----
@@ -487,6 +542,18 @@ fn main() {
     let encoders = Arc::new(Mutex::new(encoders::Encoders::new()));
     server::spawn(engine.clone(), encoders.clone(), 11250);
 
+    // Optional: auto-load the image model at startup from HOBBYLM_IMAGE_DIR.
+    let image: Arc<Mutex<Option<Arc<ImageEngine>>>> = Arc::new(Mutex::new(None));
+    if let Ok(dir) = std::env::var("HOBBYLM_IMAGE_DIR") {
+        match ImageEngine::load(std::path::Path::new(&dir)) {
+            Ok(e) => {
+                eprintln!("auto-loaded image model ({}px) from {dir}", e.resolution());
+                *image.lock().unwrap() = Some(Arc::new(e));
+            }
+            Err(e) => eprintln!("HOBBYLM_IMAGE_DIR load failed: {e}"),
+        }
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState {
@@ -494,10 +561,12 @@ fn main() {
             cancel: Arc::new(AtomicBool::new(false)),
             encoders,
             mcp,
+            image,
         })
         .invoke_handler(tauri::generate_handler![
             load_model, chat, stop, encode_speech, encode_image, mcp_add, mcp_remove, mcp_status,
-            mcp_set_tool, computer_windows, computer_use, computer_goal
+            mcp_set_tool, computer_windows, computer_use, computer_goal, load_image_model,
+            generate_image
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

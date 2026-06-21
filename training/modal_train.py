@@ -245,7 +245,7 @@ def generate(run_name: str = "130M_10B", ckpt: str = "model.pt", prompt: str = "
 def diffgen(run_name: str = "500M_diff_5b", ckpt: str = "ckpt_1000.pt", prompt: str = "",
             gen_len: int = 64, block: int = 32, steps: int = 64, temperature: float = 0.0,
             rep_penalty: float = 1.0, remask_steps: int = 0, remask_frac: float = 0.3,
-            sweep: int = 0):
+            sweep: int = 0, chat: int = 0):
     """Iterative-denoising sample from a pure-diffusion (LLaDA) checkpoint. The saved config
     carries diffusion=True, so load_model rebuilds it bidirectional automatically."""
     import os, sys, torch
@@ -258,12 +258,15 @@ def diffgen(run_name: str = "500M_diff_5b", ckpt: str = "ckpt_1000.pt", prompt: 
     model, cfg, val_loss, step = load_model(ckpt_path, dev)
     assert cfg.diffusion, f"{ckpt_path} is not a diffusion model (cfg.diffusion=False)"
     enc = tiktoken.get_encoding("gpt2")
-    prompts = [prompt] if prompt else [
-        "The capital of France is",
-        "Once upon a time, there was a",
-        "The meaning of life is",
-        "Water boils at a temperature of",
-    ]
+    if prompt:
+        prompts = [f"USER: {prompt}\nASSISTANT:" if chat else prompt]
+    else:
+        prompts = [
+            "The capital of France is",
+            "Once upon a time, there was a",
+            "The meaning of life is",
+            "Water boils at a temperature of",
+        ]
     print(f"loaded {ckpt_path} | step={step} val_loss={val_loss} | diffusion={cfg.diffusion} "
           f"mask_id={cfg.mask_token_id}", flush=True)
     # decode-config sweep: load model once, try several denoise settings on the same prompts.
@@ -686,7 +689,7 @@ def main(action: str = "train", preset: str = "130M", steps: int = 4000,
                        rep_penalty=float(kv.get("rep_penalty", 1.0)),
                        remask_steps=int(kv.get("remask_steps", 0)),
                        remask_frac=float(kv.get("remask_frac", 0.3)),
-                       sweep=int(kv.get("sweep", 0)))
+                       sweep=int(kv.get("sweep", 0)), chat=int(kv.get("chat", 0)))
     elif action == "speedtest":
         # synthetic throughput probe at the target scale (default 1B); one H100 per variant, parallel.
         variants = ["baseline", "fused_ce", "polar", "all_safe"]  # fp8 dropped: no speedup + zero-grad (see OPT_PRESETS)

@@ -17,8 +17,9 @@ class SiglipVision(nn.Module):
     def __init__(self, model_id: str = SIGLIP2_ID, device="cuda", dtype=torch.bfloat16):
         super().__init__()
         from transformers import AutoModel, AutoImageProcessor
-        # AutoImageProcessor, NOT AutoProcessor: we only do image preprocessing. AutoProcessor also loads
-        # the SigLIP2 text tokenizer (SentencePiece), which fails on some transformers builds and is unused.
+        # AutoImageProcessor, NOT AutoProcessor: we only do image preprocessing here. AutoProcessor also
+        # tries to load the SigLIP2 text tokenizer (SentencePiece), which fails on some transformers
+        # builds (vocab_file=None) — and we never use it.
         self.processor = AutoImageProcessor.from_pretrained(model_id)
         full = AutoModel.from_pretrained(model_id, torch_dtype=dtype)
         self.vision = full.vision_model.to(device).eval()

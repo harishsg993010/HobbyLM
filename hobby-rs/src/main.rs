@@ -10,9 +10,9 @@ use std::time::Instant;
 #[derive(Parser)]
 #[command(about = "CPU inference for the 500M hobbylm MoE")]
 struct Args {
-    /// Path to the GGUF (F32 or quantized: Q8_0/Q5_0/Q4_K/Q6_K)
+    /// Path to the GGUF (F32 or quantized: Q8_0/Q5_0/Q4_K/Q6_K). Not needed for --image-dir.
     #[arg(short, long)]
-    model: PathBuf,
+    model: Option<PathBuf>,
     #[arg(short, long, default_value = "The capital of France is")]
     prompt: String,
     #[arg(short, long, default_value_t = 64)]
@@ -56,6 +56,19 @@ struct Args {
     audio: Option<PathBuf>,
     #[arg(long)]
     speech: Option<PathBuf>,
+    /// TEXT-TO-IMAGE mode: directory of exported image weights (dit/clip/dcae safetensors + metas).
+    /// When set, hobby-rs generates an image from --prompt instead of running the LLM.
+    #[arg(long)]
+    image_dir: Option<PathBuf>,
+    /// (image mode) output PNG path
+    #[arg(long, default_value = "out.png")]
+    out: PathBuf,
+    /// (image mode) classifier-free guidance scale
+    #[arg(long, default_value_t = 5.0)]
+    cfg: f32,
+    /// (image mode) negative prompt for the CFG uncond branch (empty -> zero-embedding)
+    #[arg(long)]
+    neg: Option<String>,
 }
 
 fn ggml_type_name(t: u32) -> &'static str {
@@ -90,8 +103,32 @@ fn main() -> Result<()> {
         rayon::ThreadPoolBuilder::new().num_threads(t).build_global().ok();
     }
 
+    // ---- text-to-image mode -------------------------------------------------
+    if let Some(dir) = &args.image_dir {
+        use hobby_rs::imagegen::{ImageEngine, NEG_DEFAULT};
+        let t0 = Instant::now();
+        let eng = ImageEngine::load(dir)?;
+        let neg = args.neg.clone().unwrap_or_else(|| NEG_DEFAULT.to_string());
+        eprintln!("image engine loaded ({}px) in {:.1}s | prompt: {:?}",
+                  eng.resolution(), t0.elapsed().as_secs_f32(), args.prompt);
+        eprintln!("sampling: steps={} cfg={} seed={} neg={}",
+                  args.steps, args.cfg, args.seed, if neg.is_empty() { "off" } else { "on" });
+        let tg = Instant::now();
+        let (rgb, w, h) = eng.generate(&args.prompt, &neg, args.steps, args.cfg, args.seed,
+            |s, tot| {
+                eprint!("\r  step {s}/{tot}");
+                std::io::stderr().flush().ok();
+            });
+        eprintln!("\n  sampled+decoded in {:.1}s", tg.elapsed().as_secs_f32());
+        let png = hobby_rs::png::encode_rgb(&rgb, w, h);
+        std::fs::write(&args.out, &png)?;
+        eprintln!("wrote {} ({}x{}, {:.1} MB)", args.out.display(), w, h, png.len() as f64 / 1e6);
+        return Ok(());
+    }
+
+    let model = args.model.clone().ok_or_else(|| anyhow::anyhow!("--model is required (or use --image-dir for text-to-image)"))?;
     if args.info {
-        let g = gguf::Gguf::open(&args.model)?;
+        let g = gguf::Gguf::open(&model)?;
         use std::collections::BTreeMap;
         let mut counts: BTreeMap<u32, (usize, String)> = BTreeMap::new();
         for (name, t) in &g.tensors {
@@ -110,7 +147,7 @@ fn main() -> Result<()> {
         "f32" | "none" => false,
         other => bail!("unknown --quant `{other}` (use q8 or f32)"),
     };
-    let eng = Engine::load(&args.model, quant)?;
+    let eng = Engine::load(&model, quant)?;
     let c = &eng.cfg;
     eprintln!(
         "loaded {} | d={} L={} experts={}/top{} vocab={} ctx={} | quant={} | weights {:.2} GB | init {:.2}s",
