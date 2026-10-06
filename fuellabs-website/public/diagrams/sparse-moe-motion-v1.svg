@@ -1,0 +1,208 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
+  <title id="title">Animated HobbyLM sparse mixture-of-experts layer</title>
+  <desc id="desc">A continuous illustrative animation of one token entering a sigmoid router, selecting eight of sixty-four routed experts, combining their weighted outputs with one always-active shared expert, and continuing to the residual stream.</desc>
+  <defs>
+    <pattern id="dotGrid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <circle cx="1" cy="1" r="1" fill="#D8D4C9" opacity="0.10"/>
+    </pattern>
+    <marker id="arrowLime" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,4 L0,8 Z" fill="#B7F34A"/>
+    </marker>
+    <filter id="motionGlow" x="-200%" y="-200%" width="500%" height="500%">
+      <feGaussianBlur stdDeviation="4" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <style>
+      .sans{font-family:'General Sans','Helvetica Neue',Arial,sans-serif}
+      .mono{font-family:'IBM Plex Mono','SFMono-Regular',Consolas,monospace}
+      .ink{fill:#F2EFE8}.muted{fill:#8E9088}.lime{fill:#B7F34A}.dark{fill:#11110F}
+      .hair{stroke:#51534D;stroke-width:1;fill:none}.route{stroke:#B7F34A;stroke-width:2;fill:none;stroke-linecap:round;stroke-linejoin:round}
+      .route-soft{stroke:#B7F34A;stroke-width:1.5;fill:none;stroke-linecap:round;opacity:.72}
+      .node{fill:#141512;stroke:#6A6C65;stroke-width:1.2}.node-strong{fill:#141512;stroke:#F2EFE8;stroke-width:1.3}
+      .label{font-size:12px;letter-spacing:1.35px}.meta{font-size:11px;letter-spacing:1px}.small{font-size:12px}.body{font-size:15px}.node-title{font-size:17px;font-weight:500}.expert{font-size:16px;font-weight:500}
+      .motion-path{fill:none;stroke:#F2EFE8;stroke-width:3;stroke-linecap:round;filter:url(#motionGlow)}
+      .motion-packet{fill:#F2EFE8;filter:url(#motionGlow)}
+      @media (prefers-reduced-motion:reduce){#motion-layer{display:none}}
+    </style>
+  </defs>
+
+  <rect width="1600" height="900" fill="#11110F"/>
+  <rect x="28" y="28" width="1544" height="844" fill="url(#dotGrid)"/>
+  <rect x="28.5" y="28.5" width="1543" height="843" class="hair"/>
+
+  <!-- Header -->
+  <line x1="28" y1="104" x2="1572" y2="104" class="hair"/>
+  <text x="52" y="74" class="mono lime" font-size="16" font-weight="500">SPARSE MoE LAYER</text>
+  <text x="235" y="74" class="mono muted" font-size="16">(HobbyLM)</text>
+  <text x="1548" y="71" text-anchor="end" class="mono muted label">ONE TOKEN · ONE MoE LAYER · TOP-8 ROUTING</text>
+
+  <!-- Column labels -->
+  <text x="64" y="144" class="mono muted label">01 / TOKEN STATE</text>
+  <text x="433" y="144" class="mono muted label">02 / ROUTER</text>
+  <text x="704" y="144" class="mono muted label">03 / ROUTED EXPERTS</text>
+  <text x="1115" y="144" class="mono muted label">04 / COMBINE</text>
+
+  <!-- Input -->
+  <text x="64" y="182" class="sans ink" font-size="25">“The sky is”</text>
+  <g id="token-sequence" data-stage="token">
+    <rect x="64" y="214" width="90" height="70" class="node"/>
+    <rect x="164" y="214" width="90" height="70" class="node"/>
+    <rect x="264" y="214" width="90" height="70" fill="#171914" stroke="#B7F34A" stroke-width="1.5"/>
+    <text x="80" y="244" class="sans ink body">The</text><text x="80" y="266" class="mono muted meta">TOKEN 01</text>
+    <text x="180" y="244" class="sans ink body">sky</text><text x="180" y="266" class="mono muted meta">TOKEN 02</text>
+    <text x="280" y="244" class="sans ink body">is</text><text x="280" y="266" class="mono lime meta">TOKEN 03</text>
+  </g>
+  <text x="365" y="238" class="mono muted small">xₜ</text>
+
+  <!-- Router -->
+  <path id="token-to-router" data-stage="route-in" d="M354 249 H433" class="route" marker-end="url(#arrowLime)"/>
+  <g id="router" data-stage="router">
+    <rect x="445" y="193" width="190" height="112" class="node-strong"/>
+    <text x="540" y="235" text-anchor="middle" class="sans ink node-title">Router</text>
+    <text x="540" y="262" text-anchor="middle" class="mono muted meta">SIGMOID AFFINITY</text>
+    <text x="540" y="282" text-anchor="middle" class="mono muted meta">+ SELECTION BIAS</text>
+  </g>
+
+  <!-- Selection readout -->
+  <g id="selection-readout" data-stage="ranking">
+    <text x="445" y="348" class="mono muted label">SELECTED ROUTES</text>
+    <line x1="445" y1="361" x2="635" y2="361" class="hair"/>
+    <text x="445" y="388" class="mono lime small">ROUTE 01</text><text x="603" y="388" text-anchor="end" class="mono muted small">SELECTED</text>
+    <text x="445" y="412" class="mono lime small">ROUTE 02</text><text x="603" y="412" text-anchor="end" class="mono muted small">SELECTED</text>
+    <text x="445" y="436" class="mono lime small">ROUTE 03</text><text x="603" y="436" text-anchor="end" class="mono muted small">SELECTED</text>
+    <text x="445" y="460" class="mono lime small">ROUTE 04</text><text x="603" y="460" text-anchor="end" class="mono muted small">SELECTED</text>
+    <text x="445" y="484" class="mono lime small">ROUTE 05</text><text x="603" y="484" text-anchor="end" class="mono muted small">SELECTED</text>
+    <text x="445" y="508" class="mono lime small">ROUTE 06</text><text x="603" y="508" text-anchor="end" class="mono muted small">SELECTED</text>
+    <text x="445" y="532" class="mono lime small">ROUTE 07</text><text x="603" y="532" text-anchor="end" class="mono muted small">SELECTED</text>
+    <text x="445" y="556" class="mono lime small">ROUTE 08</text><text x="603" y="556" text-anchor="end" class="mono muted small">SELECTED</text>
+    <text x="445" y="584" class="mono muted small">09–64</text><text x="603" y="584" text-anchor="end" class="mono muted small">NOT SELECTED</text>
+  </g>
+
+  <!-- Router to experts -->
+  <g id="dispatch-paths" data-stage="dispatch">
+    <path d="M635 249 C676 249 675 195 704 195" class="route-soft"/>
+    <path d="M635 249 C682 249 677 253 704 253" class="route-soft"/>
+    <path d="M635 249 C681 249 681 311 704 311" class="route-soft"/>
+    <path d="M635 249 C681 249 681 369 704 369" class="route-soft"/>
+    <path d="M635 249 C681 249 681 427 704 427" class="route-soft"/>
+    <path d="M635 249 C681 249 681 485 704 485" class="route-soft"/>
+    <path d="M635 249 C681 249 681 543 704 543" class="route-soft"/>
+    <path d="M635 249 C681 249 681 601 704 601" class="route-soft"/>
+  </g>
+
+  <!-- Experts -->
+  <text x="704" y="169" class="mono muted meta">TOP-8 OF 64 SELECTED PER TOKEN</text>
+  <g id="selected-experts" data-stage="experts">
+    <g><rect x="704" y="177" width="150" height="44" class="lime"/><text x="779" y="205" text-anchor="middle" class="sans dark expert">Selected 01</text></g>
+    <g><rect x="704" y="235" width="150" height="44" class="lime"/><text x="779" y="263" text-anchor="middle" class="sans dark expert">Selected 02</text></g>
+    <g><rect x="704" y="293" width="150" height="44" class="lime"/><text x="779" y="321" text-anchor="middle" class="sans dark expert">Selected 03</text></g>
+    <g><rect x="704" y="351" width="150" height="44" class="lime"/><text x="779" y="379" text-anchor="middle" class="sans dark expert">Selected 04</text></g>
+    <g><rect x="704" y="409" width="150" height="44" class="lime"/><text x="779" y="437" text-anchor="middle" class="sans dark expert">Selected 05</text></g>
+    <g><rect x="704" y="467" width="150" height="44" class="lime"/><text x="779" y="495" text-anchor="middle" class="sans dark expert">Selected 06</text></g>
+    <g><rect x="704" y="525" width="150" height="44" class="lime"/><text x="779" y="553" text-anchor="middle" class="sans dark expert">Selected 07</text></g>
+    <g><rect x="704" y="583" width="150" height="44" class="lime"/><text x="779" y="611" text-anchor="middle" class="sans dark expert">Selected 08</text></g>
+  </g>
+
+  <!-- Expert outputs -->
+  <g id="expert-output-paths" data-stage="expert-output">
+    <path d="M854 199 C930 199 945 330 1035 390" class="route-soft"/>
+    <path d="M854 257 C930 257 950 344 1035 399" class="route-soft"/>
+    <path d="M854 315 C930 315 955 360 1035 408" class="route-soft"/>
+    <path d="M854 373 C930 373 965 390 1035 417" class="route-soft"/>
+    <path d="M854 431 C930 431 965 430 1035 426" class="route-soft"/>
+    <path d="M854 489 C930 489 955 462 1035 435" class="route-soft"/>
+    <path d="M854 547 C930 547 950 480 1035 444" class="route-soft"/>
+    <path d="M854 605 C930 605 945 500 1035 453" class="route-soft"/>
+  </g>
+
+  <!-- Routed combine -->
+  <g id="routed-combine" data-stage="combine-routed">
+    <rect x="1035" y="365" width="184" height="116" class="node-strong"/>
+    <text x="1127" y="405" text-anchor="middle" class="sans ink node-title">Weighted</text>
+    <text x="1127" y="428" text-anchor="middle" class="sans ink node-title">routed combine</text>
+    <text x="1127" y="454" text-anchor="middle" class="mono muted meta">Σ WEIGHTED EXPERT</text>
+    <text x="1127" y="472" text-anchor="middle" class="mono muted meta">OUTPUTS</text>
+  </g>
+
+  <!-- Shared expert -->
+  <path id="shared-input" data-stage="shared" d="M354 249 C382 249 380 704 490 704 H900" class="route"/>
+  <g id="shared-expert" data-stage="shared">
+    <rect x="640" y="672" width="315" height="64" class="node-strong"/>
+    <text x="797.5" y="701" text-anchor="middle" class="sans ink node-title">Shared expert</text>
+    <text x="797.5" y="722" text-anchor="middle" class="mono muted meta">ALWAYS ACTIVE · EVERY TOKEN</text>
+  </g>
+
+  <!-- Final combine -->
+  <path d="M1219 423 H1270 V464 H1301" class="route"/>
+  <path d="M955 704 H1270 V514 H1301" class="route"/>
+  <text x="1235" y="410" class="mono muted small">rₜ</text>
+  <text x="978" y="690" class="mono muted small">sₜ</text>
+  <g id="output-combine" data-stage="combine-output">
+    <rect x="1301" y="429" width="172" height="120" class="node-strong"/>
+    <text x="1387" y="469" text-anchor="middle" class="sans ink node-title">MoE output</text>
+    <text x="1387" y="493" text-anchor="middle" class="sans ink node-title">combine</text>
+    <text x="1387" y="520" text-anchor="middle" class="mono muted meta">ROUTED + SHARED</text>
+  </g>
+  <path id="output-path" data-stage="output" d="M1473 489 H1493" class="route" marker-end="url(#arrowLime)"/>
+  <rect x="1500" y="465" width="48" height="48" class="node"/>
+  <text x="1524" y="495" text-anchor="middle" class="mono ink body">yₜ</text>
+  <text x="1524" y="535" text-anchor="middle" class="mono muted meta">TO RESIDUAL</text>
+  <text x="1524" y="552" text-anchor="middle" class="mono muted meta">STREAM</text>
+
+  <!-- Continuous six-second teaching loop. The base diagram remains readable at rest. -->
+  <g id="motion-layer" pointer-events="none">
+    <circle r="5" class="motion-packet">
+      <animate attributeName="opacity" dur="6.4s" repeatCount="indefinite" values="0;1;1;0;0" keyTimes="0;.02;.12;.15;1"/>
+      <animateMotion dur="6.4s" repeatCount="indefinite" path="M354 249 H433" keyPoints="0;0;1;1" keyTimes="0;.02;.12;1" calcMode="linear"/>
+    </circle>
+
+    <rect x="445" y="193" width="190" height="112" fill="none" stroke="#B7F34A" stroke-width="3" filter="url(#motionGlow)">
+      <animate attributeName="opacity" dur="6.4s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.11;.15;.25;.3;1"/>
+    </rect>
+
+    <g id="dispatch-packets">
+      <circle r="4" class="motion-packet"><animate attributeName="opacity" dur="6.4s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.2;.22;.36;.39;1"/><animateMotion dur="6.4s" repeatCount="indefinite" path="M635 249 C676 249 675 195 704 195" keyPoints="0;0;1;1" keyTimes="0;.2;.36;1" calcMode="linear"/></circle>
+      <circle r="4" class="motion-packet"><animate attributeName="opacity" dur="6.4s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.2;.22;.36;.39;1"/><animateMotion dur="6.4s" repeatCount="indefinite" path="M635 249 C682 249 677 253 704 253" keyPoints="0;0;1;1" keyTimes="0;.2;.36;1" calcMode="linear"/></circle>
+      <circle r="4" class="motion-packet"><animate attributeName="opacity" dur="6.4s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.2;.22;.36;.39;1"/><animateMotion dur="6.4s" repeatCount="indefinite" path="M635 249 C681 249 681 311 704 311" keyPoints="0;0;1;1" keyTimes="0;.2;.36;1" calcMode="linear"/></circle>
+      <circle r="4" class="motion-packet"><animate attributeName="opacity" dur="6.4s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.2;.22;.36;.39;1"/><animateMotion dur="6.4s" repeatCount="indefinite" path="M635 249 C681 249 681 369 704 369" keyPoints="0;0;1;1" keyTimes="0;.2;.36;1" calcMode="linear"/></circle>
+      <circle r="4" class="motion-packet"><animate attributeName="opacity" dur="6.4s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.2;.22;.36;.39;1"/><animateMotion dur="6.4s" repeatCount="indefinite" path="M635 249 C681 249 681 427 704 427" keyPoints="0;0;1;1" keyTimes="0;.2;.36;1" calcMode="linear"/></circle>
+      <circle r="4" class="motion-packet"><animate attributeName="opacity" dur="6.4s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.2;.22;.36;.39;1"/><animateMotion dur="6.4s" repeatCount="indefinite" path="M635 249 C681 249 681 485 704 485" keyPoints="0;0;1;1" keyTimes="0;.2;.36;1" calcMode="linear"/></circle>
+      <circle r="4" class="motion-packet"><animate attributeName="opacity" dur="6.4s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.2;.22;.36;.39;1"/><animateMotion dur="6.4s" repeatCount="indefinite" path="M635 249 C681 249 681 543 704 543" keyPoints="0;0;1;1" keyTimes="0;.2;.36;1" calcMode="linear"/></circle>
+      <circle r="4" class="motion-packet"><animate attributeName="opacity" dur="6.4s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.2;.22;.36;.39;1"/><animateMotion dur="6.4s" repeatCount="indefinite" path="M635 249 C681 249 681 601 704 601" keyPoints="0;0;1;1" keyTimes="0;.2;.36;1" calcMode="linear"/></circle>
+    </g>
+
+    <rect x="700" y="173" width="158" height="458" fill="none" stroke="#F2EFE8" stroke-width="2" filter="url(#motionGlow)">
+      <animate attributeName="opacity" dur="6.4s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.34;.38;.46;.5;1"/>
+    </rect>
+
+    <g id="expert-return-packets">
+      <circle r="4" class="motion-packet"><animate attributeName="opacity" dur="6.4s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.44;.46;.64;.67;1"/><animateMotion dur="6.4s" repeatCount="indefinite" path="M854 199 C930 199 945 330 1035 390" keyPoints="0;0;1;1" keyTimes="0;.44;.64;1" calcMode="linear"/></circle>
+      <circle r="4" class="motion-packet"><animate attributeName="opacity" dur="6.4s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.44;.46;.64;.67;1"/><animateMotion dur="6.4s" repeatCount="indefinite" path="M854 257 C930 257 950 344 1035 399" keyPoints="0;0;1;1" keyTimes="0;.44;.64;1" calcMode="linear"/></circle>
+      <circle r="4" class="motion-packet"><animate attributeName="opacity" dur="6.4s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.44;.46;.64;.67;1"/><animateMotion dur="6.4s" repeatCount="indefinite" path="M854 315 C930 315 955 360 1035 408" keyPoints="0;0;1;1" keyTimes="0;.44;.64;1" calcMode="linear"/></circle>
+      <circle r="4" class="motion-packet"><animate attributeName="opacity" dur="6.4s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.44;.46;.64;.67;1"/><animateMotion dur="6.4s" repeatCount="indefinite" path="M854 373 C930 373 965 390 1035 417" keyPoints="0;0;1;1" keyTimes="0;.44;.64;1" calcMode="linear"/></circle>
+      <circle r="4" class="motion-packet"><animate attributeName="opacity" dur="6.4s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.44;.46;.64;.67;1"/><animateMotion dur="6.4s" repeatCount="indefinite" path="M854 431 C930 431 965 430 1035 426" keyPoints="0;0;1;1" keyTimes="0;.44;.64;1" calcMode="linear"/></circle>
+      <circle r="4" class="motion-packet"><animate attributeName="opacity" dur="6.4s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.44;.46;.64;.67;1"/><animateMotion dur="6.4s" repeatCount="indefinite" path="M854 489 C930 489 955 462 1035 435" keyPoints="0;0;1;1" keyTimes="0;.44;.64;1" calcMode="linear"/></circle>
+      <circle r="4" class="motion-packet"><animate attributeName="opacity" dur="6.4s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.44;.46;.64;.67;1"/><animateMotion dur="6.4s" repeatCount="indefinite" path="M854 547 C930 547 950 480 1035 444" keyPoints="0;0;1;1" keyTimes="0;.44;.64;1" calcMode="linear"/></circle>
+      <circle r="4" class="motion-packet"><animate attributeName="opacity" dur="6.4s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.44;.46;.64;.67;1"/><animateMotion dur="6.4s" repeatCount="indefinite" path="M854 605 C930 605 945 500 1035 453" keyPoints="0;0;1;1" keyTimes="0;.44;.64;1" calcMode="linear"/></circle>
+    </g>
+
+    <circle r="5" class="motion-packet">
+      <animate attributeName="opacity" dur="6.4s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.12;.15;.66;.69;1"/>
+      <animateMotion dur="6.4s" repeatCount="indefinite" path="M354 249 C382 249 380 704 490 704 H900" keyPoints="0;0;1;1" keyTimes="0;.12;.66;1" calcMode="linear"/>
+    </circle>
+
+    <rect x="1031" y="361" width="192" height="124" fill="none" stroke="#B7F34A" stroke-width="3" filter="url(#motionGlow)">
+      <animate attributeName="opacity" dur="6.4s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.62;.66;.72;.76;1"/>
+    </rect>
+    <circle r="5" class="motion-packet"><animate attributeName="opacity" dur="6.4s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.68;.7;.79;.82;1"/><animateMotion dur="6.4s" repeatCount="indefinite" path="M1219 423 H1270 V464 H1301" keyPoints="0;0;1;1" keyTimes="0;.68;.79;1" calcMode="linear"/></circle>
+    <circle r="5" class="motion-packet"><animate attributeName="opacity" dur="6.4s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.68;.7;.79;.82;1"/><animateMotion dur="6.4s" repeatCount="indefinite" path="M955 704 H1270 V514 H1301" keyPoints="0;0;1;1" keyTimes="0;.68;.79;1" calcMode="linear"/></circle>
+    <rect x="1297" y="425" width="180" height="128" fill="none" stroke="#B7F34A" stroke-width="3" filter="url(#motionGlow)"><animate attributeName="opacity" dur="6.4s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.77;.81;.86;.89;1"/></rect>
+    <circle r="5" class="motion-packet"><animate attributeName="opacity" dur="6.4s" repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;.84;.86;.92;.95;1"/><animateMotion dur="6.4s" repeatCount="indefinite" path="M1473 489 H1493" keyPoints="0;0;1;1" keyTimes="0;.84;.92;1" calcMode="linear"/></circle>
+    <rect x="1496" y="461" width="56" height="56" fill="none" stroke="#B7F34A" stroke-width="3" filter="url(#motionGlow)"><animate attributeName="opacity" dur="6.4s" repeatCount="indefinite" values="0;0;1;1;0" keyTimes="0;.9;.94;.98;1"/></rect>
+  </g>
+
+  <!-- Footer -->
+  <line x1="28" y1="800" x2="1572" y2="800" class="hair"/>
+  <text x="52" y="836" class="mono muted meta">CONCEPTUAL ROUTING TRACE · NO MEASURED ROUTER TELEMETRY SHOWN</text>
+  <text x="1548" y="836" text-anchor="end" class="mono muted meta">HOBBYLM / SPARSE MoE / MOTION STUDY V1</text>
+</svg>

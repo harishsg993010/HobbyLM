@@ -6,6 +6,9 @@ Needle-style single-shot: query + tools -> tool call. Eval uses Needle's metrics
   python -m modal run modal_tools.py --action eval         # Needle-protocol tool-call metrics
 """
 import modal
+from pathlib import Path
+
+REPO_ROOT = str(Path(__file__).resolve().parent.parent)
 
 _deps = (
     modal.Image.debian_slim(python_version="3.11")
@@ -17,7 +20,7 @@ _deps = (
 # keeps the build context small — a 16 GB context upload was getting reset (WinError 10054)
 # on this connection before the run could start.
 img = _deps.add_local_dir(
-    ".", "/root/moe-lab",
+    REPO_ROOT, "/root/moe-lab",
     ignore=["hobby-chat/**", "hobby-rs/**", "hobby-rs-cli/**", "needle/**", "acc_gen/**",
             "runs/**", ".git/**", "__pycache__/**", "**/__pycache__/**",
             "*.gguf", "*.bin", "*.wav", "*.jpg", "*.jpeg", "*.png", "*.log", "**/*.pyc"],
@@ -447,11 +450,11 @@ def main(action: str = "prep", max_steps: int = 4000, micro: int = 8, lr: float 
          run: str = "500M_vlm_tools", n: int = 400, constrained: int = 1, weighted: int = 0,
          source: str = "", val_file: str = "tools_val.jsonl", save: str = "", init: str = "500M_vlm_joint5",
          cats: str = "", debug: int = 0, backbone: str = "", force: int = 0, train_file: str = "", flat: int = 1,
-         traj: int = 0):
+         traj: int = 0, max_len: int = 0):
     if action == "export":
         export_gguf.remote(run=run)
     elif action == "prep_chat":
-        prep_chat.remote()
+        prep_chat.remote(max_len=(max_len or 2048))
     elif action == "prep_dpo":
         prep_dpo.remote()
     elif action == "dpo":
@@ -465,7 +468,13 @@ def main(action: str = "prep", max_steps: int = 4000, micro: int = 8, lr: float 
     elif action == "train":
         train.remote(max_steps=max_steps, micro=micro, lr=lr, weighted=bool(weighted), traj=bool(traj),
                      save_name=(save or "500M_vlm_tools"), init_run=init,
-                     train_file=(train_file or (f"{source}_train.jsonl" if source else "tools_train.jsonl")))
+                     train_file=(train_file or (f"{source}_train.jsonl" if source else "tools_train.jsonl")),
+                     backbone_run=backbone, max_len=max_len)
+    elif action == "train_chat":
+        train.remote(max_steps=(max_steps if max_steps != 4000 else 1500), micro=micro, lr=lr, traj=True,
+                     save_name=(save or "30M_chat_sft"), init_run=init,
+                     train_file=(train_file or "chat_train.jsonl"), backbone_run=backbone,
+                     max_len=(max_len or 1024))
     elif action == "train_weighted":
         train.remote(max_steps=max_steps, micro=micro, lr=lr, save_name="500M_vlm_tools_w", weighted=True)
     elif action == "prep_traj":

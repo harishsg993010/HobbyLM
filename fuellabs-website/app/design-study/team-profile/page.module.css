@@ -1,0 +1,192 @@
+.page {
+  width: min(100% - (2 * var(--gutter)), var(--container));
+  margin-inline: auto;
+  padding-bottom: clamp(3rem, 6vw, 5rem);
+  border-inline: var(--hairline);
+}
+
+.heading {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: var(--space-12);
+  padding: clamp(3rem, 5vw, 4.5rem) clamp(2rem, 4vw, 4rem) var(--space-8);
+  border-bottom: var(--hairline);
+}
+
+.heading h1 {
+  margin: 0;
+  font-size: clamp(3.75rem, 6vw, 6rem);
+  font-weight: 400;
+  letter-spacing: -0.055em;
+  line-height: 0.95;
+}
+
+.stage {
+  display: grid;
+  width: min(70%, 68rem);
+  grid-template-columns: minmax(0, 1.5fr) minmax(16rem, 0.5fr);
+  gap: clamp(2rem, 5vw, 4rem);
+  align-items: center;
+  margin-inline: auto;
+  padding-top: clamp(2rem, 4vw, 3rem);
+}
+
+.portraitField {
+  position: relative;
+  min-width: 0;
+  overflow: hidden;
+  border: var(--hairline);
+  background-color: var(--color-paper);
+  background-image:
+    radial-gradient(circle at center, rgb(17 17 15 / 11%) 0 2px, transparent 2.5px),
+    linear-gradient(to right, transparent calc(50% - 0.5px), var(--color-line) 50%, transparent calc(50% + 0.5px)),
+    linear-gradient(to bottom, transparent calc(50% - 0.5px), var(--color-line) 50%, transparent calc(50% + 0.5px));
+  background-size: 2rem 2rem, 100% 100%, 100% 100%;
+}
+
+.portraits {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  min-height: 19rem;
+  align-items: center;
+  justify-content: center;
+  gap: clamp(0.5rem, 2vw, 1.5rem);
+  padding: 1.5rem 2rem;
+}
+
+.portrait {
+  width: min(46%, 15rem);
+  aspect-ratio: 1;
+  margin: 0;
+}
+
+.portrait img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  object-position: center bottom;
+}
+
+.portraitInactive img {
+  transform: scale(0.9);
+  transform-origin: center bottom;
+}
+
+.portraitActive img {
+  transform: scale(1);
+  transform-origin: center bottom;
+}
+
+.signalOne,
+.signalTwo,
+.signalThree {
+  position: absolute;
+  width: 0.55rem;
+  height: 0.55rem;
+  background: var(--color-lime);
+}
+
+.signalOne {
+  top: 15%;
+  left: 17%;
+}
+
+.signalTwo {
+  top: 31%;
+  right: 20%;
+}
+
+.signalThree {
+  right: 10%;
+  bottom: 18%;
+}
+
+.selector {
+  padding-block: var(--space-6);
+  border-block: var(--hairline);
+}
+
+.selector > p {
+  margin: 0;
+  padding: 0 var(--space-4) var(--space-3);
+  color: var(--color-muted);
+  font-family: var(--font-mono);
+  font-size: 0.9375rem;
+}
+
+.selector button {
+  position: relative;
+  isolation: isolate;
+  display: grid;
+  width: 100%;
+  min-height: 3.25rem;
+  grid-template-columns: 1fr;
+  align-items: center;
+  padding: var(--space-3) var(--space-4);
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  font-family: var(--font-article-body);
+  font-size: clamp(0.9375rem, 1.15vw, 1.125rem);
+  letter-spacing: -0.015em;
+  text-align: left;
+}
+
+.selector button::after {
+  position: absolute;
+  z-index: -1;
+  inset: 0.25rem 0;
+  background: var(--color-lime);
+  content: "";
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform 220ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.selector button:hover::after,
+.selector button[aria-pressed="true"]::after {
+  transform: scaleX(1);
+}
+
+.founderName {
+  display: inline-block;
+  white-space: nowrap;
+}
+
+@media (max-width: 64rem) {
+  .stage {
+    width: min(calc(100% - 3rem), 48rem);
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 50rem) {
+  .heading {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: var(--space-6);
+    padding: 3.5rem 1.5rem var(--space-8);
+  }
+
+  .heading h1 {
+    font-size: clamp(4rem, 18vw, 5.5rem);
+  }
+
+  .portraits {
+    min-height: 15rem;
+    padding: 1rem 0.75rem;
+  }
+
+  .portrait {
+    width: 50%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .selector button::after {
+    transition: none;
+  }
+}

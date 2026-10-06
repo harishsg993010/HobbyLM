@@ -116,6 +116,11 @@ class TrainConfig:
 
 # ---- preset architectures (starting points; tune with count_params.py) ----
 PRESETS: dict[str, ModelConfig] = {
+    "30M": ModelConfig(    # ~30.0M total / ~18.2M active; tiny learning preset for local understanding
+        d_model=256, n_layers=13, n_dense_layers=1,
+        n_q_heads=4, n_kv_heads=1, head_dim=64,
+        dense_ffn=1024, expert_ffn=128, n_experts=12, top_k=2, n_shared=0,
+    ),
     # dims tuned so TOTAL params hit targets (see count_params.py); G = dense_ffn/expert_ffn
     "130M": ModelConfig(   # ~140M total / ~62M active, G=8; top_k bumped 4->8 (ablation: -0.025 val loss)
         d_model=512, n_layers=12, n_dense_layers=1,

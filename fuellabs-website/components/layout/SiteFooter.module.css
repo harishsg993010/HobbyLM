@@ -1,0 +1,9 @@
+.footer { padding-block: var(--space-16); color: var(--color-paper); background: var(--color-ink); }
+.footer :global(a) { color: inherit; }
+.inner { display: grid; width: min(100% - (2 * var(--gutter)), var(--container)); margin-inline: auto; grid-template-columns: 1fr auto auto; gap: var(--space-16); }
+.brand :global(a) { color: var(--color-paper); }
+.links { display: grid; grid-template-columns: repeat(3, auto); gap: var(--space-8); align-content: start; }
+.links a, .social a { display: inline-flex; min-width: 2.75rem; min-height: 2.75rem; align-items: center; justify-content: center; font-size: 0.875rem; text-underline-offset: 0.25rem; }
+.social { display: grid; grid-template-columns: repeat(3, auto); gap: var(--space-6); align-content: start; }
+.note { display: flex; grid-column: 1 / -1; justify-content: space-between; padding-top: var(--space-6); border-top: 1px solid #3a3a35; color: #aaa99f; font-size: 0.75rem; }
+@media (max-width: 50rem) { .inner { grid-template-columns: 1fr; gap: var(--space-10); } .links, .social { grid-template-columns: repeat(3, auto); justify-content: start; gap: var(--space-6); } .links a, .social a { justify-content: flex-start; } .note { display: grid; gap: var(--space-2); } }

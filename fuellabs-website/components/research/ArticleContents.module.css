@@ -1,0 +1,13 @@
+.desktop { position: sticky; top: 7.5rem; align-self: start; }
+.desktop p, .mobile summary { margin: 0 0 var(--space-4); font-size: .875rem; font-weight: 500; }
+.desktop ol, .mobile ol { display: grid; margin: 0; padding: 0; gap: var(--space-3); list-style: none; }
+.desktop a, .mobile a { display: block; min-height: 2.75rem; color: var(--color-muted); font-size: .8125rem; line-height: 1.4; text-decoration: none; }
+.desktop a { min-height: 0; }
+.desktop a:hover, .mobile a:hover { color: var(--color-ink); }
+.desktop a:focus-visible, .mobile a:focus-visible, .mobile summary:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 4px; }
+.desktop a[aria-current="location"] { color: var(--color-ink); }
+.desktop a[aria-current="location"]::before { display: inline-block; width: .45rem; height: .45rem; margin-right: var(--space-2); background: var(--color-lime); content: ""; }
+.mobile { display: none; margin: 0 0 var(--space-12); padding-block: var(--space-4); border-block: var(--hairline); }
+.mobile summary { min-height: 2.75rem; margin: 0; padding-top: .7rem; cursor: pointer; }
+.mobile ol { padding: var(--space-3) 0 var(--space-2); }
+@media (max-width: 73.75rem) { .desktop { display: none; } .mobile { display: block; } }

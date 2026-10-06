@@ -64,12 +64,14 @@ def main():
     ap.add_argument("--batch_tokens", type=int, default=256 * 1024)
     ap.add_argument("--micro_batch_seqs", type=int, default=16)
     ap.add_argument("--val_every", type=int, default=250)
+    ap.add_argument("--val_tokens", type=int, default=10 * 1024 * 1024)
     ap.add_argument("--out_dir", default="runs")
     ap.add_argument("--save_every", type=int, default=0, help="save a checkpoint every N steps (0=only final)")
     ap.add_argument("--no_compile", action="store_true")
     ap.add_argument("--orthogonalizer", default="ns5", choices=["ns5", "polar"],
                     help="Muon orthogonalizer: ns5 (Newton-Schulz) or polar (Polar Express)")
     ap.add_argument("--init_from", default="", help="checkpoint .pt to resume model weights from (continued pretrain)")
+    ap.add_argument("--resume_from", default="", help="checkpoint .pt to fully resume training state from")
     ap.add_argument("--lr_mult", type=float, default=1.0, help="multiply base LRs (use <1 for finetune/ctx-extension)")
     ap.add_argument("--set", nargs="*", default=[], help="model config overrides key=value")
     args = ap.parse_args()
@@ -94,7 +96,7 @@ def main():
 
     tc = TrainConfig(seq_len=args.seq_len, batch_tokens=args.batch_tokens,
                      micro_batch_seqs=args.micro_batch_seqs, max_steps=args.max_steps,
-                     val_every=args.val_every, run_name=args.run_name,
+                     val_every=args.val_every, val_tokens=args.val_tokens, run_name=args.run_name,
                      out_dir=args.out_dir, compile=not args.no_compile,
                      orthogonalizer=args.orthogonalizer)
     torch.manual_seed(tc.seed + rank)
@@ -116,7 +118,16 @@ def main():
         cfg.expert_backend = "bmm"   # grouped_mm needs CUDA bf16
 
     model = MoETransformer(cfg).to(device)   # fp32 master weights; bf16 via autocast
-    if args.init_from:
+    resume_ck = None
+    start_step = 0
+    if args.resume_from:
+        resume_ck = torch.load(args.resume_from, map_location=device, weights_only=False)
+        missing, unexpected = model.load_state_dict(resume_ck["model"], strict=False)
+        start_step = int(resume_ck.get("step", 0) or 0)
+        log(f"fully resumed from {args.resume_from} "
+            f"(prev step={start_step}, val={resume_ck.get('val_loss')}; "
+            f"missing={len(missing)} unexpected={len(unexpected)})")
+    elif args.init_from:
         ck = torch.load(args.init_from, map_location=device, weights_only=False)
         missing, unexpected = model.load_state_dict(ck["model"], strict=False)
         log(f"resumed weights from {args.init_from} "
@@ -136,6 +147,20 @@ def main():
 
     muon, adamw, (nm, na) = build_optimizers(raw_model, tc)
     log(f"optimizers: Muon over {nm} tensors, AdamW over {na} tensors")
+    if resume_ck is not None:
+        if "muon" in resume_ck and "adamw" in resume_ck:
+            muon.load_state_dict(resume_ck["muon"])
+            adamw.load_state_dict(resume_ck["adamw"])
+            log("restored optimizer states (Muon + AdamW)")
+        else:
+            log("resume checkpoint has no optimizer state; continuing with fresh optimizers")
+        if "cpu_rng_state" in resume_ck:
+            torch.set_rng_state(resume_ck["cpu_rng_state"].cpu())
+        if device.type == "cuda" and "cuda_rng_state" in resume_ck:
+            try:
+                torch.cuda.set_rng_state(resume_ck["cuda_rng_state"].cpu(), device=device)
+            except Exception as e:
+                log(f"(cuda rng restore skipped: {e})")
 
     # ---- data ----
     B, S = tc.micro_batch_seqs, tc.seq_len
@@ -157,7 +182,12 @@ def main():
         if not master:
             return
         torch.save({"model": raw_model.state_dict(),
-                    "config": {**cfg.to_dict(), "preset": args.preset}, **extra}, out_dir / fname)
+                    "config": {**cfg.to_dict(), "preset": args.preset},
+                    "muon": muon.state_dict(),
+                    "adamw": adamw.state_dict(),
+                    "cpu_rng_state": torch.get_rng_state(),
+                    "cuda_rng_state": (torch.cuda.get_rng_state(device=device) if device.type == "cuda" else None),
+                    **extra}, out_dir / fname)
         log(f"saved checkpoint -> {out_dir / fname}")
 
     def model_loss(m, x, y):
@@ -187,7 +217,13 @@ def main():
     # ---- train ----
     model.train()
     t0 = time.time()
-    for step in range(tc.max_steps):
+    freeze_step = int(tc.max_steps * tc.bias_anneal_frac)
+    if start_step >= freeze_step:
+        raw_model.set_bias_update_rate(0.0)
+        log(f"resume starts after bias-freeze point ({freeze_step}); keeping aux-free expert bias frozen")
+    if start_step >= tc.max_steps:
+        raise SystemExit(f"resume checkpoint step {start_step} is already >= target max_steps {tc.max_steps}")
+    for step in range(start_step, tc.max_steps):
         # lr schedule
         m = lr_mult(step, tc)
         for g in muon.param_groups:
@@ -195,7 +231,7 @@ def main():
         for g in adamw.param_groups:
             g["lr"] = tc.adam_lr * m
         # bias anneal
-        if step == int(tc.max_steps * tc.bias_anneal_frac):
+        if step == freeze_step:
             raw_model.set_bias_update_rate(0.0)
             log(f"step {step}: froze aux-free expert bias")
 
@@ -218,7 +254,7 @@ def main():
             raw_model.sync_expert_bias()   # keep aux-free bias buffers identical across ranks
 
         if step % tc.log_every == 0:
-            dt = (time.time() - t0) / (step + 1)
+            dt = (time.time() - t0) / (step - start_step + 1)
             log(f"step {step:5d} | loss {loss_accum.item():.4f} | lr {tc.muon_lr*m:.4f} | {dt*1000:.0f}ms/step")
         if tc.val_every and (step + 1) % tc.val_every == 0:
             vl = evaluate()

@@ -13,6 +13,7 @@
   python -m modal run modal_train.py --action train --preset 130M --run-name softmax --overrides "gating=softmax"
 """
 import subprocess
+from pathlib import Path
 import modal
 
 # dataset -> (HF repo, volume dir). 10B = ~10B unique tokens; 100B = ~100B unique tokens.
@@ -22,10 +23,12 @@ DATASETS = {
 }
 DATA_DIR = "/data/fineweb10B"  # default
 
+REPO_ROOT = str(Path(__file__).resolve().parent.parent)
+
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install("torch==2.12.0", "numpy", "huggingface-hub", "tqdm", "tiktoken")
-    .add_local_dir(".", "/root/moe-lab")   # mounted at runtime (code iteration without rebuild)
+    .add_local_dir(REPO_ROOT, "/root/moe-lab")   # mount the actual repo, independent of launch cwd
 )
 
 # separate image for lm-evaluation-harness (heavy deps: transformers/datasets) so it doesn't
@@ -38,7 +41,7 @@ eval_image = (
     # route downloads via std CDN (xet endpoint rate-limits under parallelism); cache datasets/models
     # on a shared volume so parallel eval containers don't each re-download (avoids HF 429s).
     .env({"HF_HUB_DISABLE_XET": "1", "HF_HOME": "/cache/hf"})
-    .add_local_dir(".", "/root/moe-lab")
+    .add_local_dir(REPO_ROOT, "/root/moe-lab")
 )
 
 app = modal.App("moe-lab", image=image)
@@ -87,23 +90,150 @@ OPT_PRESETS: dict[str, tuple[list, str]] = {
 }
 
 
+# ---- budget-aware run profiles ----
+# These are simple guardrails so we do fewer expensive "oops" runs when credits are tight.
+BUDGET_PROFILES = {
+    "none": {
+        "notes": "No automatic budget overrides. Use the exact CLI values you pass.",
+    },
+    "check": {
+        "gpus": 1,
+        "steps": 50,
+        "micro": 8,
+        "batch_tokens": 64 * 1024,
+        "save_every": 50,
+        "opts": "all_safe",
+        "notes": "Cheap health-check block. Use before committing to a bigger run.",
+    },
+    "pilot": {
+        "gpus": 1,
+        "steps": 200,
+        "micro": 8,
+        "batch_tokens": 128 * 1024,
+        "save_every": 100,
+        "opts": "all_safe",
+        "notes": "Small single-GPU pilot to verify loss is moving and data path is correct.",
+    },
+    "tight_resume": {
+        "gpus": 1,
+        "steps": 250,
+        "micro": 8,
+        "batch_tokens": 128 * 1024,
+        "save_every": 125,
+        "opts": "all_safe",
+        "notes": "Very cheap continuation block for low remaining credits. Use when we mainly want signal, not speed.",
+    },
+    "resume_block": {
+        "gpus": 4,
+        "steps": 500,
+        "micro": 16,
+        "batch_tokens": 256 * 1024,
+        "save_every": 250,
+        "opts": "all_safe",
+        "notes": "Budget-conscious multi-GPU continuation block. Best for short, real progress.",
+    },
+    "main_block": {
+        "gpus": 4,
+        "steps": 1000,
+        "micro": 16,
+        "batch_tokens": 256 * 1024,
+        "save_every": 500,
+        "opts": "all_safe",
+        "notes": "Standard serious training block when the earlier checks already passed.",
+    },
+}
+
+
+def _resolve_profile(profile: str, *, steps: int, gpus: int, micro: int,
+                     batch_tokens: int, save_every: int, opts: str):
+    prof = BUDGET_PROFILES.get(profile or "none")
+    if not prof:
+        raise SystemExit(f"unknown profile {profile!r}; choose from {list(BUDGET_PROFILES)}")
+    resolved = {
+        "profile": profile or "none",
+        "steps": steps,
+        "gpus": gpus,
+        "micro": micro,
+        "batch_tokens": batch_tokens,
+        "save_every": save_every,
+        "opts": opts,
+        "notes": prof.get("notes", ""),
+    }
+    for key in ("steps", "gpus", "micro", "batch_tokens", "save_every", "opts"):
+        if key in prof:
+            resolved[key] = prof[key]
+    return resolved
+
+
+def _print_run_plan(*, action: str, preset: str, run_name: str, data: str, seq_len: int,
+                    resume_from: str, init_from: str, profile_cfg: dict):
+    steps = int(profile_cfg["steps"])
+    gpus = int(profile_cfg["gpus"])
+    micro = int(profile_cfg["micro"])
+    batch_tokens = int(profile_cfg["batch_tokens"])
+    save_every = int(profile_cfg["save_every"])
+    opts = profile_cfg["opts"]
+    per_step_billion = batch_tokens / 1_000_000_000
+    total_billion = steps * per_step_billion
+    ckpts = (steps // save_every) if save_every else 0
+    print("\n=== RUN PLAN ===", flush=True)
+    print(f"action:        {action}", flush=True)
+    print(f"preset:        {preset}", flush=True)
+    print(f"run_name:      {run_name}", flush=True)
+    print(f"dataset:       {data}", flush=True)
+    print(f"profile:       {profile_cfg['profile']}", flush=True)
+    print(f"notes:         {profile_cfg['notes']}", flush=True)
+    print(f"gpus:          {gpus}", flush=True)
+    print(f"steps:         {steps}", flush=True)
+    print(f"seq_len:       {seq_len}", flush=True)
+    print(f"micro:         {micro}", flush=True)
+    print(f"batch_tokens:  {batch_tokens}", flush=True)
+    print(f"opts:          {opts}", flush=True)
+    print(f"save_every:    {save_every}", flush=True)
+    print(f"checkpoints:   ~{ckpts} periodic + final", flush=True)
+    print(f"token math:    {batch_tokens} tokens/step -> ~{total_billion:.3f}B tokens this block", flush=True)
+    if resume_from:
+        print(f"resume_from:   {resume_from}", flush=True)
+        print("step meaning:  this step count is treated as EXTRA steps for the resumed block", flush=True)
+    elif init_from:
+        print(f"init_from:     {init_from}", flush=True)
+        print("step meaning:  this step count is treated as the full target for the fresh branch", flush=True)
+    else:
+        print("resume mode:   fresh start", flush=True)
+    print("budget rule:   use 1 GPU for checking/eval, 4 GPUs only for real train blocks, avoid 8 GPUs on low credits",
+          flush=True)
+
+
 def _train_body(preset, steps, run_name, overrides, gpus, micro, seq_len, batch_tokens,
-                save_every=0, data_dir=DATA_DIR, opts="baseline", init_from="", lr_mult=1.0):
+                save_every=0, data_dir=DATA_DIR, opts="baseline", init_from="", lr_mult=1.0, resume_from=""):
     import os
+    import torch
     os.chdir("/root/moe-lab")
     opt_sets, orthog = OPT_PRESETS.get(opts, ([], "ns5"))
     user_sets = overrides.split(",") if overrides else []
     all_sets = [*opt_sets, *user_sets]
     over = ["--set", *all_sets] if all_sets else []
     extra = []
-    if init_from:
+    effective_max_steps = steps
+    if resume_from:
+        ck = torch.load(resume_from, map_location="cpu", weights_only=False)
+        resume_step = int(ck.get("step", 0) or 0)
+        if steps <= resume_step:
+            effective_max_steps = resume_step + steps
+            print(f"resume block detected: checkpoint step={resume_step}, "
+                  f"requested extra steps={steps}, target max_steps={effective_max_steps}", flush=True)
+        else:
+            print(f"resume target detected: checkpoint step={resume_step}, "
+                  f"using explicit max_steps={steps}", flush=True)
+        extra += ["--resume_from", resume_from]
+    elif init_from:
         extra += ["--init_from", init_from]
     if lr_mult != 1.0:
         extra += ["--lr_mult", str(lr_mult)]
     cmd = [
         "torchrun", "--standalone", f"--nproc_per_node={gpus}", "training/train.py",
         "--preset", preset, "--run_name", run_name, "--data_dir", data_dir,
-        "--out_dir", "/data/runs", "--max_steps", str(steps), "--micro_batch_seqs", str(micro),
+        "--out_dir", "/data/runs", "--max_steps", str(effective_max_steps), "--micro_batch_seqs", str(micro),
         "--seq_len", str(seq_len), "--batch_tokens", str(batch_tokens),
         "--orthogonalizer", orthog, "--save_every", str(save_every), *extra, *over,
     ]
@@ -312,23 +442,30 @@ def specdecode(draft_run: str = "130M_10B", target_run: str = "500M_40B", K: int
 
 @app.function(gpu="H100", volumes={"/data": vol}, timeout=24 * 60 * 60)
 def train_1(preset, steps, run_name, overrides, micro, seq_len, batch_tokens, save_every=0,
-            data_dir=DATA_DIR, opts="baseline", init_from="", lr_mult=1.0):
+            data_dir=DATA_DIR, opts="baseline", init_from="", lr_mult=1.0, resume_from=""):
     return _train_body(preset, steps, run_name, overrides, 1, micro, seq_len, batch_tokens,
-                       save_every, data_dir, opts, init_from, lr_mult)
+                       save_every, data_dir, opts, init_from, lr_mult, resume_from)
+
+
+@app.function(gpu="H100:4", volumes={"/data": vol}, timeout=24 * 60 * 60)
+def train_4(preset, steps, run_name, overrides, micro, seq_len, batch_tokens, save_every=0,
+            data_dir=DATA_DIR, opts="baseline", init_from="", lr_mult=1.0, resume_from=""):
+    return _train_body(preset, steps, run_name, overrides, 4, micro, seq_len, batch_tokens,
+                       save_every, data_dir, opts, init_from, lr_mult, resume_from)
 
 
 @app.function(gpu="H100:8", volumes={"/data": vol}, timeout=24 * 60 * 60)
 def train_8(preset, steps, run_name, overrides, micro, seq_len, batch_tokens, save_every=0,
-            data_dir=DATA_DIR, opts="baseline", init_from="", lr_mult=1.0):
+            data_dir=DATA_DIR, opts="baseline", init_from="", lr_mult=1.0, resume_from=""):
     return _train_body(preset, steps, run_name, overrides, 8, micro, seq_len, batch_tokens,
-                       save_every, data_dir, opts, init_from, lr_mult)
+                       save_every, data_dir, opts, init_from, lr_mult, resume_from)
 
 
 @app.function(gpu="B200:8", volumes={"/data": vol}, timeout=24 * 60 * 60)
 def train_8b200(preset, steps, run_name, overrides, micro, seq_len, batch_tokens, save_every=0,
-                data_dir=DATA_DIR, opts="baseline", init_from="", lr_mult=1.0):
+                data_dir=DATA_DIR, opts="baseline", init_from="", lr_mult=1.0, resume_from=""):
     return _train_body(preset, steps, run_name, overrides, 8, micro, seq_len, batch_tokens,
-                       save_every, data_dir, opts, init_from, lr_mult)
+                       save_every, data_dir, opts, init_from, lr_mult, resume_from)
 
 
 # default benchmark suite for small models (all loglikelihood / multiple-choice, GPT-2/Pythia-style)
@@ -598,10 +735,25 @@ def main(action: str = "train", preset: str = "130M", steps: int = 4000,
          chunks: int = 10, micro: int = 16, seq_len: int = 1024,
          batch_tokens: int = 262144, save_every: int = 0, data: str = "10B",
          opts: str = "baseline", tasks: str = "", limit: int = 0, fewshot: int = 0,
-         init_from: str = "", lr_mult: float = 1.0, gpu_type: str = "H100"):
+         init_from: str = "", resume_from: str = "", lr_mult: float = 1.0, gpu_type: str = "H100",
+         profile: str = "none",
+         prompt: str = "", max_new_tokens: int = 120, temperature: float = 0.9,
+         top_k: int = 0):
     data_dir = DATASETS[data][1]
+    profile_cfg = _resolve_profile(profile, steps=steps, gpus=gpus, micro=micro,
+                                   batch_tokens=batch_tokens, save_every=save_every, opts=opts)
+    steps = int(profile_cfg["steps"])
+    gpus = int(profile_cfg["gpus"])
+    micro = int(profile_cfg["micro"])
+    batch_tokens = int(profile_cfg["batch_tokens"])
+    save_every = int(profile_cfg["save_every"])
+    opts = profile_cfg["opts"]
     if action == "prep_data":
         prep_data.remote(tasks or "mmlu")
+        return
+    if action == "plan":
+        _print_run_plan(action="train", preset=preset, run_name=run_name, data=data, seq_len=seq_len,
+                        resume_from=resume_from, init_from=init_from, profile_cfg=profile_cfg)
         return
     if action == "lmeval":
         # EleutherAI lm-evaluation-harness on trained checkpoint(s). run_name="both" -> 130M + 500M.
@@ -663,15 +815,21 @@ def main(action: str = "train", preset: str = "130M", steps: int = 4000,
     if action == "download":
         download.remote(chunks, data)
     elif action == "smoke":
+        _print_run_plan(action="smoke", preset=preset, run_name=run_name, data=data, seq_len=seq_len,
+                        resume_from="", init_from="", profile_cfg=profile_cfg)
         smoke.remote(preset)
     elif action == "train":
+        _print_run_plan(action="train", preset=preset, run_name=run_name, data=data, seq_len=seq_len,
+                        resume_from=resume_from, init_from=init_from, profile_cfg=profile_cfg)
         if gpus == 8:
             fn = train_8b200 if gpu_type.upper() == "B200" else train_8
+        elif gpus == 4:
+            fn = train_4
         else:
             fn = train_1
         print(f"training on {gpus}x{gpu_type.upper() if gpus == 8 else 'H100'}", flush=True)
         fn.remote(preset, steps, run_name, overrides, micro, seq_len, batch_tokens,
-                  save_every, data_dir, opts, init_from, lr_mult)
+                  save_every, data_dir, opts, init_from, lr_mult, resume_from)
     elif action == "gpu_bench":
         kv = dict(p.split("=", 1) for p in overrides.split(",") if "=" in p) if overrides else {}
         r = gpu_bench.remote(diff_run=(run_name if run_name not in ("baseline", "") else "500M_diff_20b"),
@@ -747,9 +905,10 @@ def main(action: str = "train", preset: str = "130M", steps: int = 4000,
     elif action == "results":
         results.remote()
     elif action == "generate":
-        generate.remote(run_name, "model.pt", overrides, 120, 0.9, 0)
+        gen_prompt = prompt or overrides
+        generate.remote(run_name, "model.pt", gen_prompt, max_new_tokens, temperature, top_k)
     elif action == "specdecode":
         specdecode.remote("130M_10B", "500M_40B", 4, overrides)
     else:
-        raise SystemExit(f"unknown action {action!r} (use download|smoke|train|speedtest|ablate_opts|"
+        raise SystemExit(f"unknown action {action!r} (use download|smoke|train|plan|speedtest|ablate_opts|"
                          "ablate|results|generate|specdecode|lmeval|lmeval_hf)")

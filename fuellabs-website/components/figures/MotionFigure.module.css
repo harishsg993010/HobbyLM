@@ -1,0 +1,64 @@
+.figure {
+  min-width: 0;
+  margin: 0;
+  color: inherit;
+}
+
+.media {
+  overflow: hidden;
+  background: #090a08;
+}
+
+.media img,
+.media video {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.meta {
+  display: flex;
+  min-height: 3.25rem;
+  padding-top: var(--space-3);
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-6);
+  font-size: var(--text-caption);
+  line-height: 1.55;
+}
+
+.meta figcaption {
+  max-width: 64ch;
+  color: currentColor;
+  opacity: 0.68;
+}
+
+.meta button {
+  display: grid;
+  width: 2.75rem;
+  min-height: 2.75rem;
+  padding: 0;
+  place-items: center;
+  border: 1px solid currentColor;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+}
+
+.meta button:hover:not(:disabled) {
+  color: var(--color-lime);
+}
+
+.meta button:disabled {
+  cursor: default;
+  opacity: 0.62;
+}
+
+@media (max-width: 40rem) {
+  .meta {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .meta button { width: 2.75rem; }
+}

@@ -1,0 +1,7 @@
+.curtain { position: fixed; z-index: 1000; inset: 0; display: grid; place-items: center; background: var(--color-paper); will-change: transform; }
+.logo { animation: wordmark 1000ms cubic-bezier(.22,1,.36,1) both; }
+.skip { position: absolute; right: var(--gutter); bottom: var(--space-6); min-height: 2.75rem; padding: var(--space-3) var(--space-4); border: var(--hairline); background: transparent; }
+.leave { animation: curtain 1000ms cubic-bezier(.76,0,.24,1) both; }
+@keyframes wordmark { from { opacity: 0; transform: translateY(1.125rem); } to { opacity: 1; transform: none; } }
+@keyframes curtain { to { transform: translateY(-100%); } }
+@media (prefers-reduced-motion: reduce) { .curtain { display: none; } }

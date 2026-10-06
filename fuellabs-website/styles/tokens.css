@@ -1,0 +1,52 @@
+:root {
+  --color-paper: #f2efe8;
+  --color-surface: #fcfcf8;
+  --color-ink: #11110f;
+  --color-lime: #b7f34a;
+  --color-muted: #66665f;
+  --color-line: #d8d4c9;
+  --color-focus: #638b17;
+
+  --signal-square-size: 0.22em;
+  --signal-square-gap: 0.16em;
+  --brand-square-size: 0.26em;
+  --brand-square-gap: 0.18em;
+
+  --font-editorial: var(--general-sans), "Helvetica Neue", Arial, sans-serif;
+  --font-article-body: var(--montserrat), "Helvetica Neue", Arial, sans-serif;
+  --font-wordmark: var(--plex-sans), "Helvetica Neue", Arial, sans-serif;
+  --font-mono: var(--plex-mono), "SFMono-Regular", Consolas, monospace;
+
+  --text-display: clamp(4.4rem, 8vw, 7.5rem);
+  --text-section: clamp(3rem, 6vw, 5.25rem);
+  --text-article: clamp(1.625rem, 2.6vw, 2rem);
+  --text-intro: clamp(1.25rem, 2vw, 1.5rem);
+  --text-body: 1.0625rem;
+  --text-label: 0.75rem;
+  --text-caption: 0.8125rem;
+
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+  --space-12: 3rem;
+  --space-16: 4rem;
+  --space-24: 6rem;
+  --space-32: 8rem;
+  --space-40: 10rem;
+
+  --container: 85rem;
+  --gutter: clamp(1.5rem, 5vw, 5rem);
+  --section-block: clamp(4.5rem, 9vw, 8rem);
+  --hairline: 1px solid var(--color-line);
+}
+
+@media (max-width: 50rem) {
+  :root {
+    --text-display: 3.25rem;
+    --text-section: 2.75rem;
+    --section-block: 4.5rem;
+  }
+}

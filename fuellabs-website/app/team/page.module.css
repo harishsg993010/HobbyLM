@@ -1,0 +1,7 @@
+.team { min-height: calc(100svh - 5.25rem); padding-top: clamp(3rem, 6vw, 5.5rem); }
+.heading { display: flex; align-items: start; justify-content: space-between; gap: clamp(4rem, 10vw, 10rem); }
+.heading h1 { margin: .12em 0 0; }
+.note { display: flex; padding-top: var(--space-6); align-items: end; justify-content: space-between; border-top: var(--hairline); color: var(--color-muted); font-size: var(--text-caption); }
+.note p { max-width: 42ch; margin: 0; }
+.note :global(a) { font-size: 1.125rem; }
+@media (max-width: 50rem) { .heading { display: grid; gap: 0; } .heading h1 { margin-top: var(--space-12); } .note { margin-top: var(--space-16); } }

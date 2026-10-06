@@ -1,0 +1,4 @@
+.wordmark { display: inline-flex; min-height: 2.75rem; align-items: baseline; color: var(--color-ink); font-family: var(--font-wordmark); font-size: 1.6875rem; font-weight: 500; letter-spacing: -1.4px; line-height: 1; text-decoration: none; white-space: nowrap; }
+.labs { color: var(--color-muted); }
+.square { display: inline-block; width: var(--brand-square-size); height: var(--brand-square-size); margin-left: var(--brand-square-gap); background: var(--color-lime); }
+.large { font-size: clamp(3.5rem, 8vw, 7rem); letter-spacing: -0.052em; }

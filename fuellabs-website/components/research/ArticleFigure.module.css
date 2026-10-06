@@ -1,0 +1,40 @@
+.figure {
+  width: min(52rem, calc(100vw - (2 * var(--gutter))));
+  margin: var(--space-16) 0 var(--space-16) 50%;
+  transform: translateX(-50%);
+}
+
+.figure picture,
+.figure img {
+  display: block;
+  width: 100%;
+}
+
+.figure img { height: auto; }
+
+.figure figcaption {
+  max-width: 72ch;
+  margin: var(--space-4) auto 0;
+  color: var(--color-muted);
+  font-family: var(--font-editorial);
+  font-size: var(--text-caption);
+  line-height: 1.55;
+  text-align: center;
+}
+
+.figure figcaption span {
+  display: block;
+  margin-bottom: var(--space-2);
+  color: var(--color-ink);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 73.75rem) {
+  .figure { width: min(60rem, calc(100vw - (2 * var(--gutter)))); }
+}
+
+@media (max-width: 40rem) {
+  .figure { margin-block: var(--space-12); }
+  .figure figcaption { margin-top: var(--space-3); }
+}

@@ -1,0 +1,250 @@
+.interactiveFigure {
+  width: 100%;
+}
+
+.staticFallback,
+.staticFallback img,
+.inlineSvg,
+.inlineSvg svg,
+.chartPicture,
+.chartPicture img {
+  display: block;
+  width: 100%;
+}
+
+.staticFallback img,
+.inlineSvg svg,
+.chartPicture img {
+  height: auto;
+}
+
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.controls button {
+  min-height: 2.75rem;
+  padding: 0.625rem 1rem;
+  border: 1px solid var(--color-line);
+  background: transparent;
+  color: var(--color-ink);
+  cursor: pointer;
+  font-family: var(--font-editorial);
+  font-size: 0.875rem;
+}
+
+.controls .iconButton {
+  display: grid;
+  width: 2.75rem;
+  padding: 0;
+  place-items: center;
+}
+
+.controls button:hover:not(:disabled) {
+  border-color: var(--color-ink);
+}
+
+.controls button[aria-pressed="true"] {
+  border-color: var(--color-ink);
+  background: var(--color-ink);
+  color: var(--color-paper);
+}
+
+.controls button:disabled {
+  cursor: default;
+  opacity: 0.4;
+}
+
+.controls button:focus-visible,
+.validationChart:focus-visible,
+.slider:focus-visible {
+  outline: 3px solid var(--color-focus);
+  outline-offset: 4px;
+}
+
+.dataDelivery + .controls,
+.architecture + .controls {
+  margin-top: var(--space-4);
+  padding-top: var(--space-4);
+  border-top: var(--hairline);
+}
+
+.status,
+.help {
+  min-height: 3.4em;
+  margin: var(--space-3) 0 0;
+  color: var(--color-muted);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  line-height: 1.7;
+}
+
+.separator {
+  width: 1px;
+  height: 1.75rem;
+  margin-inline: var(--space-1);
+  background: var(--color-line);
+}
+
+.dataDelivery :global(.st) {
+  transition: opacity 400ms ease;
+  transition-delay: calc(var(--i, 0) * var(--stagger, 0ms));
+}
+
+.dataDelivery :global(.st1) { --stagger: 220ms; }
+.dataDelivery :global(.st4) { --stagger: 28ms; }
+.dataDelivery[data-step="0"] :global(.st1),
+.dataDelivery[data-step="0"] :global(.st2),
+.dataDelivery[data-step="0"] :global(.st3),
+.dataDelivery[data-step="0"] :global(.st4),
+.dataDelivery[data-step="1"] :global(.st2),
+.dataDelivery[data-step="1"] :global(.st3),
+.dataDelivery[data-step="1"] :global(.st4),
+.dataDelivery[data-step="2"] :global(.st3),
+.dataDelivery[data-step="2"] :global(.st4),
+.dataDelivery[data-step="3"] :global(.st4) {
+  opacity: 0;
+  transition-delay: 0ms;
+}
+
+.architecture :global(.lift) {
+  transform-box: view-box;
+  transform-origin: 0 0;
+  transition: transform 700ms cubic-bezier(0.2, 0.7, 0.2, 1), opacity 350ms;
+}
+
+.architecture :global(.upper) { transition: transform 700ms cubic-bezier(0.2, 0.7, 0.2, 1); }
+.architecture :global(.detail),
+.architecture :global(.ghost),
+.architecture :global(.guide),
+.architecture :global(.route),
+.architecture :global(.stackL) { transition: opacity 350ms; }
+.architecture :global(.sel),
+.architecture :global(.sharedtop) { transition: fill 300ms, stroke 300ms; }
+.architecture :global(.stackL) { opacity: 0; }
+.architecture[data-state="a"] :global(.stackL) { opacity: 1; }
+.architecture[data-state="a"] :global(.lift) { opacity: 0; transform: var(--from); }
+.architecture[data-state="a"] :global(.upper) { transform: translateY(40px); }
+.architecture[data-state="a"] :global(.detail),
+.architecture[data-state="a"] :global(.ghost),
+.architecture[data-state="a"] :global(.guide),
+.architecture[data-state="a"] :global(.route) { opacity: 0; }
+.architecture[data-state="b"] :global(.route) { opacity: 0; }
+.architecture[data-state="b"] :global(.sel),
+.architecture[data-state="b"] :global(.sharedtop) { fill: var(--color-paper); }
+.architecture[data-state="b"] :global(.sel) { stroke: var(--color-muted); }
+
+.validationChart {
+  position: relative;
+  touch-action: pan-y;
+}
+
+.chartOverlay {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.crosshair {
+  stroke: var(--color-muted);
+  stroke-width: 0.6;
+  stroke-dasharray: 3 3;
+}
+
+.point {
+  fill: var(--color-paper);
+  stroke: var(--color-ink);
+  stroke-width: 1.3;
+}
+
+.tooltipBackground { fill: var(--color-ink); }
+
+.tooltipText {
+  fill: var(--color-paper);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.inspector {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-5);
+  padding-block: var(--space-4);
+  border-top: var(--hairline);
+}
+
+.inspector .controls {
+  flex-wrap: nowrap;
+}
+
+.readout {
+  font-family: var(--font-mono);
+  font-size: 0.875rem;
+  line-height: 1.8;
+}
+
+.sliderLabel {
+  display: block;
+  color: var(--color-muted);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+}
+
+.slider {
+  width: 100%;
+  height: 2.75rem;
+  accent-color: var(--color-ink);
+  cursor: pointer;
+}
+
+.help {
+  min-height: 0;
+}
+
+@media (max-width: 40rem) {
+  .controls,
+  .inspector {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .inspector {
+    display: flex;
+  }
+
+  .inspector .controls {
+    flex-wrap: wrap;
+  }
+
+  .controls button:not(.iconButton) {
+    width: 100%;
+  }
+
+  .separator {
+    width: 100%;
+    height: 1px;
+    margin-block: var(--space-1);
+  }
+
+  .architecture[data-state="a"] :global(.upper) {
+    transform: translateY(22px);
+  }
+
+  .readout {
+    font-size: 0.75rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dataDelivery :global(.st),
+  .architecture :global(*) {
+    transition: none !important;
+  }
+}

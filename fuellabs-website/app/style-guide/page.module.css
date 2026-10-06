@@ -1,0 +1,12 @@
+.guide h1 { margin: 0 0 var(--space-24); }
+.block { padding-block: var(--space-16); border-top: var(--hairline); }
+.block > h2 { margin: 0 0 var(--space-8); font-size: var(--text-article); font-weight: 400; }
+.swatches { display: grid; grid-template-columns: repeat(5, 1fr); gap: var(--space-4); }
+.swatches i { display: block; height: 8rem; margin-bottom: var(--space-3); border: var(--hairline); }
+.swatches strong, .swatches code { display: block; }
+.swatches strong { font-weight: 500; }
+.swatches code { color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-caption); }
+.type { display: grid; gap: var(--space-8); }
+.type p { margin-block: 0; }
+.block ul { max-width: 50rem; padding-left: var(--space-6); }
+@media (max-width: 50rem) { .swatches { grid-template-columns: repeat(2, 1fr); } }
