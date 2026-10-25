@@ -9,6 +9,7 @@ pub mod gguf;
 pub mod imagegen;
 pub mod imgops;
 pub mod model;
+pub mod pool;
 pub mod ops;
 pub mod png;
 pub mod quant;
@@ -99,6 +100,21 @@ impl Engine {
     }
     pub fn weight_bytes(&self) -> usize {
         self.model.weight_bytes()
+    }
+    pub fn encode(&self, text: &str) -> Vec<u32> {
+        self.tok.encode(text)
+    }
+
+    /// Teacher-forced logits: prefill `ids[..split]` in one batch, then feed the rest one token at a
+    /// time through the decode path. Returns the logits after each position from `split - 1` on.
+    pub fn teacher_forced(&self, ids: &[u32], split: usize) -> Vec<Vec<f32>> {
+        let mut cache = model::KvCache::new(&self.cfg);
+        let inputs: Vec<Vec<f32>> = ids[..split].iter().map(|&i| self.model.token_embedding(i)).collect();
+        let mut out = vec![self.model.prefill(&inputs, &mut cache)];
+        for (p, &id) in ids.iter().enumerate().skip(split) {
+            out.push(self.model.forward(id, p, &mut cache));
+        }
+        out
     }
 
     /// Generate a continuation of `prompt` (optionally prefixed by `embeds` modality vectors,
@@ -285,8 +301,7 @@ impl Engine {
         let pe: Vec<Vec<f32>> = prompt_ids.iter().map(|&id| self.model.token_embedding(id)).collect();
         let (_, pk, pv) = self.model.run_block(&pe, &cache, 0);
         for li in 0..c.n_layers {
-            cache.k[li].extend_from_slice(&pk[li]);
-            cache.v[li].extend_from_slice(&pv[li]);
+            cache.push(li, &pk[li], &pv[li]);
         }
         cache.len = p;
 
@@ -378,8 +393,7 @@ impl Engine {
             // finalize: append the block's K/V to the persistent cache
             let (_, bk, bv) = self.model.run_block(&embed(&blk), &cache, base);
             for li in 0..c.n_layers {
-                cache.k[li].extend_from_slice(&bk[li]);
-                cache.v[li].extend_from_slice(&bv[li]);
+                cache.push(li, &bk[li], &bv[li]);
             }
             cache.len = b1;
             committed.extend_from_slice(&blk);

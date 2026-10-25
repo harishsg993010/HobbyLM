@@ -1,6 +1,7 @@
 //! Minimal GGUF v3 reader over an mmap. Parses the metadata KV store and the tensor
 //! directory, and hands out zero-copy `&[f32]` slices for F32 tensors.
 
+use rayon::prelude::*;
 use anyhow::{bail, Context, Result};
 use memmap2::Mmap;
 use std::collections::HashMap;
@@ -246,6 +247,25 @@ impl Gguf {
         Ok(&self.mmap[off..off + nbytes])
     }
 
+    /// For a Q8_0 tensor: its blocks as (f32 scales, int8 values), copied straight from the file,
+    /// so a Q8 runtime can skip the dequantize -> requantize round trip. None for other types.
+    pub fn q8_0(&self, name: &str) -> Option<(Vec<f32>, Vec<i8>)> {
+        let t = self.tensors.get(name)?;
+        if t.ggml_type != 8 {
+            return None;
+        }
+        let b = self.raw(t).ok()?;
+        let nb = t.n_elems() as usize / 32;
+        let d: Vec<f32> = (0..nb).into_par_iter().map(|k| rd_half(b, k * 34)).collect();
+        let mut q = vec![0i8; nb * 32];
+        q.par_chunks_mut(32).enumerate().for_each(|(k, qb)| {
+            for (j, v) in qb.iter_mut().enumerate() {
+                *v = b[k * 34 + 2 + j] as i8;
+            }
+        });
+        Some((d, q))
+    }
+
     /// Load a tensor as f32: zero-copy view for F32, or owned (dequantized) for F16/quant types.
     pub fn load(&self, name: &str) -> Result<Src<'_>> {
         let t = self
@@ -364,13 +384,13 @@ fn dequant_f16(b: &[u8], n: usize) -> Vec<f32> {
 
 fn dequant_q8_0(b: &[u8], n: usize) -> Vec<f32> {
     let mut y = vec![0.0f32; n];
-    for blk in 0..n / 32 {
+    y.par_chunks_mut(32).enumerate().for_each(|(blk, yb)| {
         let o = blk * 34;
         let d = rd_half(b, o);
-        for j in 0..32 {
-            y[blk * 32 + j] = (b[o + 2 + j] as i8 as f32) * d;
+        for (j, v) in yb.iter_mut().enumerate() {
+            *v = (b[o + 2 + j] as i8 as f32) * d;
         }
-    }
+    });
     y
 }
 

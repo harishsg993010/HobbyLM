@@ -165,6 +165,7 @@ fn main() -> Result<()> {
     print!("{}", args.prompt);
     std::io::stdout().flush().ok();
     let tg = Instant::now();
+    let mut first_tok: Option<Instant> = None;
     let ntok = if c.diffusion {
         if !mm.is_empty() {
             eprintln!("note: diffusion decode is text-only; ignoring spliced embeddings");
@@ -191,6 +192,7 @@ fn main() -> Result<()> {
     } else {
         let opts = GenOpts { max_new: args.n, temp: args.temp, top_p: args.top_p, seed: args.seed, rep_penalty: args.rep_penalty };
         eng.generate(&args.prompt, &mm, &opts, |piece| {
+            first_tok.get_or_insert_with(Instant::now);
             print!("{piece}");
             std::io::stdout().flush().ok();
             true
@@ -199,5 +201,11 @@ fn main() -> Result<()> {
     let gen_s = tg.elapsed().as_secs_f32();
     println!();
     eprintln!("decode {} tok in {:.2}s ({:.1} tok/s)", ntok, gen_s, ntok as f32 / gen_s.max(1e-6));
+    if let (Some(t1), true) = (first_tok, ntok > 1) {
+        // prompt processing + first token, then the steady-state generation rate
+        let gen = t1.elapsed().as_secs_f32();
+        eprintln!("prefill+first token {:.2}s | generation {} tok in {:.2}s ({:.1} tok/s)",
+                  (t1 - tg).as_secs_f32(), ntok - 1, gen, (ntok - 1) as f32 / gen.max(1e-6));
+    }
     Ok(())
 }

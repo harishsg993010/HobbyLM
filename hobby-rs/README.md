@@ -16,6 +16,29 @@ A from-scratch, dependency-light **CPU inference engine in Rust** for our 500M s
   plus an always-on shared expert. Only the ~7 active experts run per token.
 - f32 kernels (`ops.rs`) with rayon-parallel matmul; greedy / temperature / top-p sampling (`sample.rs`).
 
+## Decode performance design
+
+Decode is a strict chain of ~100 small parallel steps per token, so the per-step overhead matters as
+much as the kernels:
+
+- **Spin pool** (`pool.rs`) for the decode and prefill hot paths. Rayon parks idle workers, and waking
+  them cost ~100–200 µs per step on Windows. Workers here busy-wait between steps (sleeping after 20 ms
+  idle), the caller works too, and chunks are claimed by CAS on a generation-tagged counter. A slow or
+  descheduled worker never blocks a step, which matters on hybrid P/E-core CPUs.
+- **Fused MoE**: per layer, one step for gate+up of all routed + shared experts against the input
+  quantized once, and one for down, accumulating every expert in registers (`moe_fused_q8`,
+  `rows_dot_weighted`). Prefill does the same across all experts and tokens (`moe_prefill_q8`).
+- **AVX-VNNI int8 kernel** (`quant.rs::rows_dot_vnni`): one `vpdpbusd` per 32-weight block, with the
+  weight sign bit flipped in-register and an exact per-activation correction, 4 rows per activation
+  load. Falls back to the AVX2 `maddubs` kernel or scalar code on other CPUs.
+- **KV cache in f16** (F16C), head-major in 256-position blocks so each head's history streams
+  contiguously; decode attention is split over (KV head, 64-position chunk) and merged exactly.
+- **Q8_0 GGUFs load block-for-block** into the Q8 runtime (no dequantize/requantize round trip).
+
+Check accuracy after any kernel change with `cargo run --release --bin evalq -- <model.gguf> <text>`:
+it teacher-forces a text through the F32 and Q8 paths and reports top-1 agreement, KL and perplexity.
+`--bin poolbench` measures step dispatch latency and memory read bandwidth.
+
 ## Build & run
 
 ```powershell

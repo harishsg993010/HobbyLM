@@ -2,22 +2,79 @@
 //! (F32 mmap view or owned Q8_0). The fp32 router and all norms stay F32.
 
 use crate::config::Config;
-use crate::gguf::{Gguf, Src};
+use crate::gguf::Gguf;
 use crate::ops::{dot, matvec, rmsnorm, silu, softmax, Rope};
-use crate::quant::Mat;
+use crate::quant::{Mat, Q8Tensor};
 use anyhow::Result;
 use rayon::prelude::*;
 
 /// RMSNorm each of `tn` rows of `x` (row length `d`) into `out`, in parallel.
 fn rmsnorm_rows(x: &[f32], w: &[f32], eps: f32, out: &mut [f32], d: usize) {
-    out.par_chunks_mut(d).zip(x.par_chunks(d)).for_each(|(o, xr)| rmsnorm(xr, w, eps, o));
+    crate::pool::par_chunks_mut(out, d, |t, o| rmsnorm(&x[t * d..t * d + d], w, eps, o));
 }
 
-/// Split a stacked (E, a, b) tensor into E per-expert Mats of (a, b).
-fn split_experts(src: Src<'_>, ne: usize, a: usize, b: usize, quant: bool) -> Vec<Mat> {
+/// Decode-time MoE over Q8 experts in two parallel passes instead of three matvecs per expert:
+/// (1) gate and up rows of all selected experts against `h` quantized once, (2) the down
+/// projection, where each output row sums its weighted contributions across experts.
+fn moe_fused_q8(sel: &[(&Mat, &Mat, &Mat, f32)], h: &[f32], d: usize, f: usize) -> Vec<f32> {
+    const CH: usize = crate::quant::ROWS_PER_TASK;
+    let ns = sel.len();
+    let qh = crate::quant::quantize_act(h);
+    // gu row j*f + r: expert j/2, gate if j is even else up. A chunk may span two matrices.
+    let mut gu = vec![0.0f32; ns * 2 * f];
+    crate::pool::par_chunks_mut(&mut gu, CH, |c, yc| {
+        let mut i = 0;
+        while i < yc.len() {
+            let row = c * CH + i;
+            let (j, r) = (row / f, row % f);
+            let len = (f - r).min(yc.len() - i);
+            let m = if j % 2 == 0 { sel[j / 2].0 } else { sel[j / 2].1 };
+            m.as_q8().unwrap().rows_dot(r, &qh, &mut yc[i..i + len]);
+            i += len;
+        }
+    });
+    let acts: Vec<crate::quant::QAct> = (0..ns)
+        .map(|s| {
+            let a: Vec<f32> = (0..f).map(|i| silu(gu[2 * s * f + i]) * gu[(2 * s + 1) * f + i]).collect();
+            crate::quant::quantize_act(&a)
+        })
+        .collect();
+    let mats: Vec<&crate::quant::Q8Tensor> = sel.iter().map(|s| s.2.as_q8().unwrap()).collect();
+    let ar: Vec<&crate::quant::QAct> = acts.iter().collect();
+    let ws: Vec<f32> = sel.iter().map(|s| s.3).collect();
+    let mut out = vec![0.0f32; d];
+    crate::pool::par_chunks_mut(&mut out, CH, |c, yc| {
+        crate::quant::rows_dot_weighted(&mats, &ar, &ws, c * CH, yc)
+    });
+    out
+}
+
+/// Split a stacked (E, a, b) tensor into E per-expert Mats of (a, b). A Q8_0 tensor loaded for
+/// the Q8 runtime is split block-for-block without dequantizing.
+fn split_experts(g: &Gguf, name: &str, ne: usize, a: usize, b: usize, quant: bool) -> Result<Vec<Mat>> {
     let ab = a * b;
+    if quant {
+        if let Some((d, q)) = g.q8_0(name) {
+            let nb = ab / 32;
+            return Ok((0..ne)
+                .into_par_iter()
+                .map(|e| Mat::Q8(Q8Tensor::from_blocks(d[e * nb..(e + 1) * nb].to_vec(), q[e * ab..(e + 1) * ab].to_vec(), a, b)))
+                .collect());
+        }
+    }
+    let src = g.load(name)?;
     let s = src.as_slice();
-    (0..ne).map(|e| Mat::of(&s[e * ab..(e + 1) * ab], a, b, quant)).collect()
+    Ok((0..ne).map(|e| Mat::of(&s[e * ab..(e + 1) * ab], a, b, quant)).collect())
+}
+
+/// A weight matrix (out, in_), taking Q8_0 blocks straight from the file when the runtime is Q8.
+fn load_mat(g: &Gguf, name: &str, out: usize, in_: usize, quant: bool) -> Result<Mat> {
+    if quant {
+        if let Some((d, q)) = g.q8_0(name) {
+            return Ok(Mat::Q8(Q8Tensor::from_blocks(d, q, out, in_)));
+        }
+    }
+    Ok(Mat::build(g.load(name)?, out, in_, quant))
 }
 
 enum Ffn {
@@ -57,20 +114,68 @@ pub struct Model {
     layers: Vec<Layer>,
 }
 
+/// Per-layer K/V cache in f16, stored head-major in blocks of `KV_BLOCK` positions: within a block each
+/// KV head's positions are contiguous, so attention streams one head's history sequentially
+/// instead of striding across pages. Grows a block at a time (no full-context preallocation).
 pub struct KvCache {
-    pub k: Vec<Vec<f32>>,
-    pub v: Vec<Vec<f32>>,
+    k: Vec<Vec<u16>>,
+    v: Vec<Vec<u16>>,
+    n: Vec<usize>, // positions stored, per layer
+    nkv: usize,
+    hd: usize,
     pub len: usize,
 }
 
+const KV_BLOCK: usize = 256;
+
 impl KvCache {
     pub fn new(cfg: &Config) -> Self {
-        let cap = cfg.context_length * cfg.kv_dim();
         KvCache {
-            k: (0..cfg.n_layers).map(|_| Vec::with_capacity(cap)).collect(),
-            v: (0..cfg.n_layers).map(|_| Vec::with_capacity(cap)).collect(),
+            k: vec![Vec::new(); cfg.n_layers],
+            v: vec![Vec::new(); cfg.n_layers],
+            n: vec![0; cfg.n_layers],
+            nkv: cfg.n_kv_heads,
+            hd: cfg.head_dim,
             len: 0,
         }
+    }
+
+    #[inline]
+    fn at(&self, kvh: usize, t: usize) -> usize {
+        ((t / KV_BLOCK * self.nkv + kvh) * KV_BLOCK + t % KV_BLOCK) * self.hd
+    }
+
+    /// Append positions to layer `li`; `k`/`v` are position-major rows of n_kv_heads * head_dim.
+    pub fn push(&mut self, li: usize, k: &[f32], v: &[f32]) {
+        let kvd = self.nkv * self.hd;
+        for (kr, vr) in k.chunks(kvd).zip(v.chunks(kvd)) {
+            let t = self.n[li];
+            if t % KV_BLOCK == 0 {
+                let grow = self.nkv * KV_BLOCK * self.hd;
+                let len = self.k[li].len() + grow;
+                self.k[li].resize(len, 0);
+                self.v[li].resize(len, 0);
+            }
+            for h in 0..self.nkv {
+                let o = self.at(h, t);
+                crate::ops::to_f16(&kr[h * self.hd..h * self.hd + self.hd], &mut self.k[li][o..o + self.hd]);
+                crate::ops::to_f16(&vr[h * self.hd..h * self.hd + self.hd], &mut self.v[li][o..o + self.hd]);
+            }
+            self.n[li] += 1;
+        }
+    }
+
+    /// Key of KV head `kvh` at position `t` in layer `li`.
+    #[inline]
+    pub fn k(&self, li: usize, kvh: usize, t: usize) -> &[u16] {
+        let o = self.at(kvh, t);
+        &self.k[li][o..o + self.hd]
+    }
+
+    #[inline]
+    pub fn v(&self, li: usize, kvh: usize, t: usize) -> &[u16] {
+        let o = self.at(kvh, t);
+        &self.v[li][o..o + self.hd]
     }
 }
 
@@ -84,18 +189,16 @@ impl Model {
         for i in 0..cfg.n_layers {
             // norms/bias are always F32 (owned copy); weight matrices go through dequant-aware load.
             let nt = |s: &str| -> Result<Vec<f32>> { Ok(g.f32(&format!("blk.{i}.{s}"))?.to_vec()) };
-            let mt = |s: &str, out: usize, in_: usize| -> Result<Mat> {
-                Ok(Mat::build(g.load(&format!("blk.{i}.{s}"))?, out, in_, quant))
-            };
+            let mt = |s: &str, out: usize, in_: usize| load_mat(g, &format!("blk.{i}.{s}"), out, in_, quant);
             let ld = |s: &str| g.load(&format!("blk.{i}.{s}"));
             let ffn = if cfg.is_moe(i) {
                 Ffn::Moe {
                     // router kept F32 (fp32 routing precision)
                     gate_inp: Mat::build(ld("ffn_gate_inp.weight")?, cfg.n_experts, d, false),
                     bias: nt("exp_probs_b.bias")?,
-                    gate_exps: split_experts(ld("ffn_gate_exps.weight")?, cfg.n_experts, f, d, quant),
-                    up_exps: split_experts(ld("ffn_up_exps.weight")?, cfg.n_experts, f, d, quant),
-                    down_exps: split_experts(ld("ffn_down_exps.weight")?, cfg.n_experts, d, f, quant),
+                    gate_exps: split_experts(g, &format!("blk.{i}.ffn_gate_exps.weight"), cfg.n_experts, f, d, quant)?,
+                    up_exps: split_experts(g, &format!("blk.{i}.ffn_up_exps.weight"), cfg.n_experts, f, d, quant)?,
+                    down_exps: split_experts(g, &format!("blk.{i}.ffn_down_exps.weight"), cfg.n_experts, d, f, quant)?,
                     gate_sh: mt("ffn_gate_shexp.weight", f, d)?,
                     up_sh: mt("ffn_up_shexp.weight", f, d)?,
                     down_sh: mt("ffn_down_shexp.weight", d, f)?,
@@ -118,9 +221,12 @@ impl Model {
                 ffn,
             });
         }
-        let output = Mat::build(g.load("output.weight")?, cfg.vocab_size, d, quant);
+        let output = load_mat(g, "output.weight", cfg.vocab_size, d, quant)?;
         let m = Model {
-            token_embd: g.load("token_embd.weight")?.as_slice().to_vec(),
+            token_embd: match g.load("token_embd.weight")? {
+                crate::gguf::Src::Owned(v) => v,
+                crate::gguf::Src::View(v) => v.to_vec(),
+            },
             output_norm: g.f32("output_norm.weight")?.to_vec(),
             output,
             layers,
@@ -207,29 +313,66 @@ impl Model {
             self.rope.apply(kh, pos);
         }
 
-        cache.k[li].extend_from_slice(k);
-        cache.v[li].extend_from_slice(v);
-        let kc = &cache.k[li];
-        let vc = &cache.v[li];
+        cache.push(li, k, v);
+        let cache = &*cache;
         let n = pos + 1;
 
         let mut out = vec![0.0f32; qd];
-        let mut scores = vec![0.0f32; n];
-        for hq in 0..c.n_heads {
-            let kvh = hq / rep;
-            let qh = &q[hq * hd..hq * hd + hd];
-            for (t, sc) in scores.iter_mut().enumerate() {
-                let kt = &kc[t * kvd + kvh * hd..t * kvd + kvh * hd + hd];
-                *sc = dot(qh, kt) * scale;
-            }
-            softmax(&mut scores);
-            let oh = &mut out[hq * hd..hq * hd + hd];
-            for (t, &pscore) in scores.iter().enumerate() {
-                let vt = &vc[t * kvd + kvh * hd..t * kvd + kvh * hd + hd];
-                for di in 0..hd {
-                    oh[di] += pscore * vt[di];
+        let q = &*q;
+        // Split-K ("flash-decoding"): one task per (KV head, block of ATT_CHUNK positions), so a long
+        // context spreads over all threads. Each task reads its K/V rows once for the `rep` query
+        // heads sharing them and leaves a partial (max, sum, unnormalized output) per query head;
+        // the partials are then merged exactly.
+        const ATT_CHUNK: usize = 64;
+        assert!(rep <= 8, "score buffer holds up to 8 query heads per KV head");
+        let nkv = c.n_kv_heads;
+        let nch = n.div_ceil(ATT_CHUNK);
+        let pw = hd + 2; // per (task, query head): [acc; hd], max, sum
+        let mut part = vec![0.0f32; nkv * nch * rep * pw];
+        crate::pool::par_chunks_mut(&mut part, rep * pw, |task, pt_| {
+            let (kvh, ch) = (task / nch, task % nch);
+            let (t0, t1) = (ch * ATT_CHUNK, ((ch + 1) * ATT_CHUNK).min(n));
+            let mut sc = [0.0f32; ATT_CHUNK * 8];
+            let len = t1 - t0;
+            for t in t0..t1 {
+                let kt = cache.k(li, kvh, t);
+                for g in 0..rep {
+                    let hq = kvh * rep + g;
+                    sc[g * ATT_CHUNK + t - t0] = crate::ops::dot_f16(&q[hq * hd..hq * hd + hd], kt) * scale;
                 }
             }
+            for g in 0..rep {
+                let s = &mut sc[g * ATT_CHUNK..g * ATT_CHUNK + len];
+                let m = s.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                let mut l = 0.0f32;
+                for v in s.iter_mut() {
+                    *v = (*v - m).exp();
+                    l += *v;
+                }
+                pt_[g * pw + hd] = m;
+                pt_[g * pw + hd + 1] = l;
+            }
+            for t in t0..t1 {
+                let vt = cache.v(li, kvh, t);
+                for g in 0..rep {
+                    crate::ops::axpy_f16(sc[g * ATT_CHUNK + t - t0], vt, &mut pt_[g * pw..g * pw + hd]);
+                }
+            }
+        });
+        for hq in 0..c.n_heads {
+            let (kvh, g) = (hq / rep, hq % rep);
+            let pr = |ch: usize| &part[((kvh * nch + ch) * rep + g) * pw..((kvh * nch + ch) * rep + g + 1) * pw];
+            let m = (0..nch).map(|ch| pr(ch)[hd]).fold(f32::NEG_INFINITY, f32::max);
+            let oh = &mut out[hq * hd..hq * hd + hd];
+            let mut l = 0.0f32;
+            for ch in 0..nch {
+                let p = pr(ch);
+                let w = (p[hd] - m).exp();
+                l += w * p[hd + 1];
+                crate::ops::axpy(w, &p[..hd], oh);
+            }
+            let inv = 1.0 / l;
+            oh.iter_mut().for_each(|v| *v *= inv);
         }
 
         let mut proj = vec![0.0f32; c.d_model];
@@ -268,7 +411,7 @@ impl Model {
                 let ne = c.n_experts;
 
                 let mut logits = vec![0.0f32; ne];
-                gate_inp.matvec(h, &mut logits); // F32 router
+                gate_inp.matvec_pool(h, &mut logits); // F32 router
                 let mut scores = vec![0.0f32; ne];
                 if c.gating_sigmoid {
                     for e in 0..ne {
@@ -290,6 +433,19 @@ impl Model {
                     for wi in w.iter_mut() {
                         *wi /= s;
                     }
+                }
+
+                // (gate, up, down, weight) of every expert this token runs: routed top-k + shared
+                let mut sel: Vec<(&Mat, &Mat, &Mat, f32)> = topk
+                    .iter()
+                    .enumerate()
+                    .map(|(rank, &e)| (&gate_exps[e], &up_exps[e], &down_exps[e], w[rank] * c.expert_weights_scale))
+                    .collect();
+                if c.n_shared > 0 {
+                    sel.push((gate_sh, up_sh, down_sh, 1.0));
+                }
+                if sel.iter().all(|s| s.0.as_q8().is_some() && s.1.as_q8().is_some() && s.2.as_q8().is_some()) {
+                    return moe_fused_q8(&sel, h, d, f);
                 }
 
                 let mut out = vec![0.0f32; d];
@@ -383,7 +539,7 @@ impl Model {
         layer.attn_qkv.matmul(h, &mut qkv, tn);
 
         // per-row QK-norm + RoPE (at position base+t), in place
-        qkv.par_chunks_mut(qw).enumerate().for_each(|(t, row)| {
+        crate::pool::par_chunks_mut(&mut qkv, qw, |t, row| {
             let pos = base + t;
             let (q, kv) = row.split_at_mut(qd);
             let (k, _v) = kv.split_at_mut(kvd);
@@ -402,33 +558,33 @@ impl Model {
         // append all K/V to the cache (in position order)
         for t in 0..tn {
             let row = &qkv[t * qw..t * qw + qw];
-            cache.k[li].extend_from_slice(&row[qd..qd + kvd]);
-            cache.v[li].extend_from_slice(&row[qd + kvd..qw]);
+            cache.push(li, &row[qd..qd + kvd], &row[qd + kvd..qw]);
         }
-        let kc = &cache.k[li];
-        let vc = &cache.v[li];
+        let cache = &*cache;
 
-        // causal attention, parallel over query rows
+        // causal attention, one task per (query row, KV head): the KV head's keys and values are
+        // read once for the `rep` query heads that share them
+        let nkv = c.n_kv_heads;
         let mut o = vec![0.0f32; tn * qd];
-        o.par_chunks_mut(qd).enumerate().for_each(|(t, orow)| {
-            let pos = base + t;
-            let n = pos + 1;
+        crate::pool::par_chunks_mut(&mut o, rep * hd, |ci, og| {
+            let (t, kvh) = (ci / nkv, ci % nkv);
+            let n = base + t + 1;
             let qrow = &qkv[t * qw..t * qw + qd];
-            let mut scores = vec![0.0f32; n];
-            for hq in 0..c.n_heads {
-                let kvh = hq / rep;
-                let qh = &qrow[hq * hd..hq * hd + hd];
-                for (j, sc) in scores.iter_mut().enumerate() {
-                    let kt = &kc[j * kvd + kvh * hd..j * kvd + kvh * hd + hd];
-                    *sc = dot(qh, kt) * scale;
+            let mut scores = vec![0.0f32; rep * n];
+            for j in 0..n {
+                let kt = cache.k(li, kvh, j);
+                for g in 0..rep {
+                    let hq = kvh * rep + g;
+                    scores[g * n + j] = crate::ops::dot_f16(&qrow[hq * hd..hq * hd + hd], kt) * scale;
                 }
-                softmax(&mut scores);
-                let oh = &mut orow[hq * hd..hq * hd + hd];
-                for (j, &p) in scores.iter().enumerate() {
-                    let vt = &vc[j * kvd + kvh * hd..j * kvd + kvh * hd + hd];
-                    for di in 0..hd {
-                        oh[di] += p * vt[di];
-                    }
+            }
+            for g in 0..rep {
+                softmax(&mut scores[g * n..g * n + n]);
+            }
+            for j in 0..n {
+                let vt = cache.v(li, kvh, j);
+                for g in 0..rep {
+                    crate::ops::axpy_f16(scores[g * n + j], vt, &mut og[g * hd..g * hd + hd]);
                 }
             }
         });
@@ -545,8 +701,7 @@ impl Model {
             bv[t * kvd..t * kvd + kvd].copy_from_slice(&row[qd + kvd..qw]);
         }
 
-        let pk = &cache.k[li]; // prefix keys 0..base (rope already applied at finalize time)
-        let pv = &cache.v[li];
+        // prefix keys 0..base come from the cache (rope already applied at finalize time)
         let n = base + b;
         let mut o = vec![0.0f32; b * qd];
         o.par_chunks_mut(qd).enumerate().for_each(|(t, orow)| {
@@ -556,8 +711,8 @@ impl Model {
                 let kvh = hq / rep;
                 let qh = &qrow[hq * hd..hq * hd + hd];
                 for (j, sc) in scores.iter_mut().enumerate().take(base) {
-                    let kt = &pk[j * kvd + kvh * hd..j * kvd + kvh * hd + hd];
-                    *sc = dot(qh, kt) * scale;
+                    let kt = cache.k(li, kvh, j);
+                    *sc = crate::ops::dot_f16(qh, kt) * scale;
                 }
                 for j in 0..b {
                     let kt = &bk[j * kvd + kvh * hd..j * kvd + kvh * hd + hd];
@@ -566,10 +721,8 @@ impl Model {
                 softmax(&mut scores);
                 let oh = &mut orow[hq * hd..hq * hd + hd];
                 for (j, &p) in scores.iter().enumerate().take(base) {
-                    let vt = &pv[j * kvd + kvh * hd..j * kvd + kvh * hd + hd];
-                    for di in 0..hd {
-                        oh[di] += p * vt[di];
-                    }
+                    let vt = cache.v(li, kvh, j);
+                    crate::ops::axpy_f16(p, vt, oh);
                 }
                 for j in 0..b {
                     let vt = &bv[j * kvd + kvh * hd..j * kvd + kvh * hd + hd];
@@ -671,7 +824,8 @@ impl Model {
             Ffn::Moe { gate_inp, bias, gate_exps, up_exps, down_exps, gate_sh, up_sh, down_sh } => {
                 let ne = c.n_experts;
                 let mut logits = vec![0.0f32; tn * ne];
-                gate_inp.matmul(h, &mut logits, tn);
+                // F32 router, one task per token
+                crate::pool::par_chunks_mut(&mut logits, ne, |t, row| gate_inp.matvec_serial(&h[t * d..t * d + d], row));
 
                 // route each row; group token rows by selected expert
                 let mut assign: Vec<Vec<(usize, f32)>> = vec![Vec::new(); ne];
@@ -702,52 +856,127 @@ impl Model {
                     }
                 }
 
-                let mut out = vec![0.0f32; tn * d];
-                // routed experts: each processes all its rows in one batched matmul
-                for e in 0..ne {
-                    let rows = &assign[e];
-                    let m = rows.len();
-                    if m == 0 {
-                        continue;
-                    }
-                    let mut xe = vec![0.0f32; m * d];
-                    for (i, &(t, _)) in rows.iter().enumerate() {
-                        xe[i * d..i * d + d].copy_from_slice(&h[t * d..t * d + d]);
-                    }
-                    let mut ge = vec![0.0f32; m * f];
-                    let mut ue = vec![0.0f32; m * f];
-                    gate_exps[e].matmul(&xe, &mut ge, m);
-                    up_exps[e].matmul(&xe, &mut ue, m);
-                    for i in 0..m * f {
-                        ge[i] = silu(ge[i]) * ue[i];
-                    }
-                    let mut ye = vec![0.0f32; m * d];
-                    down_exps[e].matmul(&ge, &mut ye, m);
-                    for (i, &(t, wt)) in rows.iter().enumerate() {
-                        for k in 0..d {
-                            out[t * d + k] += wt * ye[i * d + k];
-                        }
-                    }
-                }
-                // shared expert: all rows
+                // expert groups: (gate, up, down, token rows with weights); the shared expert takes all rows
+                let mut groups: Vec<ExpertRows> = assign
+                    .into_iter()
+                    .enumerate()
+                    .filter(|(_, rows)| !rows.is_empty())
+                    .map(|(e, rows)| (&gate_exps[e], &up_exps[e], &down_exps[e], rows))
+                    .collect();
                 if c.n_shared > 0 {
-                    let mut gs = vec![0.0f32; tn * f];
-                    let mut us = vec![0.0f32; tn * f];
-                    gate_sh.matmul(h, &mut gs, tn);
-                    up_sh.matmul(h, &mut us, tn);
-                    for i in 0..tn * f {
-                        gs[i] = silu(gs[i]) * us[i];
-                    }
-                    let mut ys = vec![0.0f32; tn * d];
-                    down_sh.matmul(&gs, &mut ys, tn);
-                    for i in 0..tn * d {
-                        out[i] += ys[i];
-                    }
+                    groups.push((gate_sh, up_sh, down_sh, (0..tn).map(|t| (t, 1.0)).collect()));
                 }
-                out
+                if groups.iter().all(|g| g.0.as_q8().is_some() && g.1.as_q8().is_some() && g.2.as_q8().is_some()) {
+                    moe_prefill_q8(&groups, h, tn, d, f)
+                } else {
+                    moe_prefill_f32(&groups, h, tn, d, f)
+                }
             }
         }
     }
+}
+
+/// One expert's (gate, up, down) and the token rows routed to it, with their gate weights.
+type ExpertRows<'a> = (&'a Mat, &'a Mat, &'a Mat, Vec<(usize, f32)>);
+
+/// Per-expert batched MoE, for F32 weights.
+fn moe_prefill_f32(groups: &[ExpertRows], h: &[f32], tn: usize, d: usize, f: usize) -> Vec<f32> {
+    let mut out = vec![0.0f32; tn * d];
+    for (gate, up, down, rows) in groups {
+        let m = rows.len();
+        let mut xe = vec![0.0f32; m * d];
+        for (i, &(t, _)) in rows.iter().enumerate() {
+            xe[i * d..i * d + d].copy_from_slice(&h[t * d..t * d + d]);
+        }
+        let mut ge = vec![0.0f32; m * f];
+        let mut ue = vec![0.0f32; m * f];
+        gate.matmul(&xe, &mut ge, m);
+        up.matmul(&xe, &mut ue, m);
+        for i in 0..m * f {
+            ge[i] = silu(ge[i]) * ue[i];
+        }
+        let mut ye = vec![0.0f32; m * d];
+        down.matmul(&ge, &mut ye, m);
+        for (i, &(t, wt)) in rows.iter().enumerate() {
+            for k in 0..d {
+                out[t * d + k] += wt * ye[i * d + k];
+            }
+        }
+    }
+    out
+}
+
+/// Batched MoE over Q8 experts in two parallel passes across ALL experts at once, instead of
+/// three small matmuls per expert: (1) gate+up, one task per (expert, block of rows), with every
+/// token row quantized once; (2) down, one task per (expert, block of output rows). Then each
+/// token sums its experts' outputs.
+fn moe_prefill_q8(groups: &[ExpertRows], h: &[f32], tn: usize, d: usize, f: usize) -> Vec<f32> {
+    use crate::quant::{quantize_act, QAct};
+    const CH: usize = crate::quant::ROWS_PER_TASK;
+    let pool = crate::pool::pool();
+    let mut qh: Vec<QAct> = (0..tn).map(|_| QAct::default()).collect();
+    crate::pool::par_chunks_mut(&mut qh, 1, |t, q| q[0] = quantize_act(&h[t * d..t * d + d]));
+
+    // pair p = (group, row in group), laid out group by group
+    let mut first = Vec::with_capacity(groups.len());
+    let mut npairs = 0;
+    for g in groups {
+        first.push(npairs);
+        npairs += g.3.len();
+    }
+
+    // pass 1: gu[p] = [gate f | up f]
+    let fch = f.div_ceil(CH);
+    let mut gu = vec![0.0f32; npairs * 2 * f];
+    let gp = gu.as_mut_ptr() as usize;
+    pool.run(groups.len() * 2 * fch, &|task| {
+        let (g, which, rc) = (task / (2 * fch), (task / fch) % 2, task % fch);
+        let m = if which == 0 { groups[g].0 } else { groups[g].1 }.as_q8().unwrap();
+        let (r0, n) = (rc * CH, CH.min(f - rc * CH));
+        for (i, &(t, _)) in groups[g].3.iter().enumerate() {
+            let off = (first[g] + i) * 2 * f + which * f + r0;
+            // each (pair, matrix, row block) is written by exactly one task
+            let y = unsafe { std::slice::from_raw_parts_mut((gp as *mut f32).add(off), n) };
+            m.rows_dot(r0, &qh[t], y);
+        }
+    });
+
+    let mut acts: Vec<QAct> = (0..npairs).map(|_| QAct::default()).collect();
+    crate::pool::par_chunks_mut(&mut acts, 1, |p, a| {
+        let row = &gu[p * 2 * f..p * 2 * f + 2 * f];
+        let v: Vec<f32> = (0..f).map(|i| silu(row[i]) * row[f + i]).collect();
+        a[0] = quantize_act(&v);
+    });
+
+    // pass 2: ye[p] = down(act[p])
+    let dch = d.div_ceil(CH);
+    let mut ye = vec![0.0f32; npairs * d];
+    let yp = ye.as_mut_ptr() as usize;
+    pool.run(groups.len() * dch, &|task| {
+        let (g, rc) = (task / dch, task % dch);
+        let m = groups[g].2.as_q8().unwrap();
+        let (r0, n) = (rc * CH, CH.min(d - rc * CH));
+        for i in 0..groups[g].3.len() {
+            let p = first[g] + i;
+            let y = unsafe { std::slice::from_raw_parts_mut((yp as *mut f32).add(p * d + r0), n) };
+            m.rows_dot(r0, &acts[p], y);
+        }
+    });
+
+    // combine: each token adds its experts' outputs in group order
+    let mut contrib: Vec<Vec<(usize, f32)>> = vec![Vec::new(); tn];
+    for (g, grp) in groups.iter().enumerate() {
+        for (i, &(t, w)) in grp.3.iter().enumerate() {
+            contrib[t].push((first[g] + i, w));
+        }
+    }
+    let mut out = vec![0.0f32; tn * d];
+    crate::pool::par_chunks_mut(&mut out, d, |t, o| {
+        for &(p, w) in &contrib[t] {
+            crate::ops::axpy(w, &ye[p * d..p * d + d], o);
+        }
+    });
+    out
 }
 
 fn norm_head(v: &mut [f32], w: &[f32], eps: f32) {

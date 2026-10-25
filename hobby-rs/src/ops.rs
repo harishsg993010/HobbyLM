@@ -35,6 +35,155 @@ pub fn dot(a: &[f32], b: &[f32]) -> f32 {
     s
 }
 
+// ---- f16, the KV cache storage type: F16C where available, software otherwise ----
+
+/// f32 -> IEEE half, round to nearest even.
+pub fn f32_to_f16(x: f32) -> u16 {
+    let b = x.to_bits();
+    let sign = ((b >> 16) & 0x8000) as u16;
+    let exp = ((b >> 23) & 0xff) as i32;
+    let man = b & 0x7f_ffff;
+    if exp == 0xff {
+        return sign | 0x7c00 | if man != 0 { 0x200 } else { 0 };
+    }
+    let e = exp - 127 + 15;
+    if e >= 0x1f {
+        return sign | 0x7c00;
+    }
+    if e <= 0 {
+        if e < -10 {
+            return sign;
+        }
+        let m = man | 0x80_0000;
+        let shift = (14 - e) as u32;
+        let half = 1u32 << (shift - 1);
+        let rem = m & ((1 << shift) - 1);
+        let mut r = m >> shift;
+        if rem > half || (rem == half && r & 1 == 1) {
+            r += 1;
+        }
+        return sign | r as u16;
+    }
+    let mut r = ((e as u32) << 10) | (man >> 13);
+    let rem = man & 0x1fff;
+    if rem > 0x1000 || (rem == 0x1000 && r & 1 == 1) {
+        r += 1; // a carry into the exponent is still the correctly rounded value
+    }
+    sign | r as u16
+}
+
+pub fn f16_to_f32(h: u16) -> f32 {
+    let sign = ((h as u32) & 0x8000) << 16;
+    let exp = ((h >> 10) & 0x1f) as u32;
+    let man = (h & 0x3ff) as u32;
+    let bits = if exp == 0 {
+        if man == 0 {
+            sign
+        } else {
+            // subnormal: normalize
+            let mut e: u32 = 127 - 15 + 1;
+            let mut m = man;
+            while m & 0x400 == 0 {
+                m <<= 1;
+                e -= 1;
+            }
+            sign | (e << 23) | ((m & 0x3ff) << 13)
+        }
+    } else if exp == 0x1f {
+        sign | 0x7f80_0000 | (man << 13)
+    } else {
+        sign | ((exp + 127 - 15) << 23) | (man << 13)
+    };
+    f32::from_bits(bits)
+}
+
+/// dst = f16(src)
+pub fn to_f16(src: &[f32], dst: &mut [u16]) {
+    #[cfg(all(target_arch = "x86_64", target_feature = "f16c"))]
+    if src.len() % 8 == 0 {
+        use std::arch::x86_64::*;
+        for i in (0..src.len()).step_by(8) {
+            unsafe {
+                let v = _mm256_loadu_ps(src.as_ptr().add(i));
+                let h = _mm256_cvtps_ph::<_MM_FROUND_TO_NEAREST_INT>(v);
+                _mm_storeu_si128(dst.as_mut_ptr().add(i) as *mut __m128i, h);
+            }
+        }
+        return;
+    }
+    for (d, &x) in dst.iter_mut().zip(src) {
+        *d = f32_to_f16(x);
+    }
+}
+
+/// a . b with b stored as f16
+#[inline]
+pub fn dot_f16(a: &[f32], b: &[u16]) -> f32 {
+    debug_assert_eq!(a.len(), b.len());
+    #[cfg(all(target_arch = "x86_64", target_feature = "f16c", target_feature = "fma"))]
+    if a.len() % 16 == 0 {
+        use std::arch::x86_64::*;
+        unsafe {
+            let (mut s0, mut s1) = (_mm256_setzero_ps(), _mm256_setzero_ps());
+            for i in (0..a.len()).step_by(16) {
+                let b0 = _mm256_cvtph_ps(_mm_loadu_si128(b.as_ptr().add(i) as *const __m128i));
+                let b1 = _mm256_cvtph_ps(_mm_loadu_si128(b.as_ptr().add(i + 8) as *const __m128i));
+                s0 = _mm256_fmadd_ps(_mm256_loadu_ps(a.as_ptr().add(i)), b0, s0);
+                s1 = _mm256_fmadd_ps(_mm256_loadu_ps(a.as_ptr().add(i + 8)), b1, s1);
+            }
+            let s = _mm256_add_ps(s0, s1);
+            let lo = _mm256_castps256_ps128(s);
+            let hi = _mm256_extractf128_ps(s, 1);
+            let t = _mm_add_ps(lo, hi);
+            let t = _mm_add_ps(t, _mm_movehl_ps(t, t));
+            let t = _mm_add_ss(t, _mm_shuffle_ps(t, t, 0b01));
+            return _mm_cvtss_f32(t);
+        }
+    }
+    a.iter().zip(b).map(|(&x, &h)| x * f16_to_f32(h)).sum()
+}
+
+/// y += a * x with x stored as f16
+#[inline]
+pub fn axpy_f16(a: f32, x: &[u16], y: &mut [f32]) {
+    debug_assert_eq!(x.len(), y.len());
+    #[cfg(all(target_arch = "x86_64", target_feature = "f16c", target_feature = "fma"))]
+    if x.len() % 8 == 0 {
+        use std::arch::x86_64::*;
+        unsafe {
+            let av = _mm256_set1_ps(a);
+            for i in (0..x.len()).step_by(8) {
+                let xv = _mm256_cvtph_ps(_mm_loadu_si128(x.as_ptr().add(i) as *const __m128i));
+                let yp = y.as_mut_ptr().add(i);
+                _mm256_storeu_ps(yp, _mm256_fmadd_ps(av, xv, _mm256_loadu_ps(yp)));
+            }
+        }
+        return;
+    }
+    for (yo, &h) in y.iter_mut().zip(x) {
+        *yo += a * f16_to_f32(h);
+    }
+}
+
+/// y += a * x
+#[inline]
+pub fn axpy(a: f32, x: &[f32], y: &mut [f32]) {
+    debug_assert_eq!(x.len(), y.len());
+    let n = x.len();
+    let av = f32x8::splat(a);
+    let mut i = 0;
+    while i + 8 <= n {
+        let xv = f32x8::new(<[f32; 8]>::try_from(&x[i..i + 8]).unwrap());
+        let yv = f32x8::new(<[f32; 8]>::try_from(&y[i..i + 8]).unwrap());
+        y[i..i + 8].copy_from_slice(&xv.mul_add(av, yv).to_array());
+        i += 8;
+    }
+    while i < n {
+        y[i] += a * x[i];
+        i += 1;
+    }
+}
+
 /// y[o] = sum_i w[o*in + i] * x[i]  for o in 0..out.  w is (out, in) row-major.
 /// Parallel over output rows. Used for every Linear / per-expert GLU matmul.
 pub fn matvec(w: &[f32], x: &[f32], y: &mut [f32]) {
@@ -162,6 +311,39 @@ impl Rope {
             let x2 = v[self.half + i];
             v[i] = x1 * c - x2 * s;
             v[self.half + i] = x2 * c + x1 * s;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The software f16 path (used without F16C) must round exactly like the hardware.
+    #[cfg(all(target_arch = "x86_64", target_feature = "f16c"))]
+    #[test]
+    fn f16_software_matches_f16c() {
+        let mut x = 0x1234_5678u64;
+        let mut vals: Vec<f32> = vec![0.0, -0.0, 1.0, 65504.0, 65520.0, 1e-8, 6.1e-5, 5.9e-8, f32::INFINITY, -f32::INFINITY];
+        for _ in 0..1_000_000 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            let v = f32::from_bits(x as u32);
+            if v.is_finite() && v.abs() < 1e6 {
+                vals.push(v);
+            }
+        }
+        vals.truncate(vals.len() / 8 * 8);
+        let mut hw = vec![0u16; vals.len()];
+        to_f16(&vals, &mut hw);
+        for (&v, &h) in vals.iter().zip(&hw) {
+            assert_eq!(f32_to_f16(v), h, "f32_to_f16({v:e})");
+            let back = unsafe {
+                use std::arch::x86_64::*;
+                _mm_cvtss_f32(_mm_cvtph_ps(_mm_set1_epi16(h as i16)))
+            };
+            assert_eq!(f16_to_f32(h).to_bits(), back.to_bits(), "f16_to_f32({h:#x})");
         }
     }
 }
